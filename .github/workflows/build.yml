@@ -33,8 +33,16 @@ jobs:
             GRADLE_FILE=android/app/build.gradle
           fi
           echo "Using Gradle file: $GRADLE_FILE"
+          
+          # تعديل الحد الأدنى (minSdk)
           sed -i 's/minSdkVersion.*/minSdkVersion 21/g' "$GRADLE_FILE" || true
           sed -i 's/minSdk = .*/minSdk = 21/g' "$GRADLE_FILE" || true
+          
+          # إجبار النظام على استخدام الإصدار 34 لحل مشكلة share_plus
+          sed -i 's/compileSdkVersion.*/compileSdkVersion 34/g' "$GRADLE_FILE" || true
+          sed -i 's/compileSdk = .*/compileSdk = 34/g' "$GRADLE_FILE" || true
+          sed -i 's/targetSdkVersion.*/targetSdkVersion 34/g' "$GRADLE_FILE" || true
+          sed -i 's/targetSdk = .*/targetSdk = 34/g' "$GRADLE_FILE" || true
 
       - name: Write Firebase configuration (google-services.json + firebase_options.dart)
         env:
@@ -208,3 +216,4 @@ jobs:
         with:
           name: app-release-apk
           path: build/app/outputs/flutter-apk/app-release.apk
+
