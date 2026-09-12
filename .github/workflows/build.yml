@@ -24,7 +24,7 @@ jobs:
         with:
           channel: 'stable'
 
-      - name: Regenerate Android Project & Clean SDK Config
+      - name: Regenerate Android Project & Safely Update SDK Config
         run: |
           flutter create . --platforms=android --org com.elsheikhcustoms
 
@@ -33,7 +33,7 @@ jobs:
           echo "flutter.targetSdkVersion=36" >> android/local.properties
           echo "flutter.minSdkVersion=21" >> android/local.properties
 
-          # تعديل ملف build.gradle.kts بشكل نظيف وآمن لتجنب تداخل الرموز
+          # تعديل ملف build.gradle.kts بطريقة آمنة سطر بسطر بدون تداخل أقواس
           python3 - << 'PYEOF'
           import os, re
 
@@ -42,26 +42,29 @@ jobs:
               with open(path, "r", encoding="utf-8") as f:
                   content = f.read()
 
-              # إزالة الأسطر القديمة الخاصة بالـ SDK لمنع التداخل
-              content = re.sub(r'compileSdk\s*=.*', '', content)
-              content = re.sub(r'compileSdkVersion\s*=.*', '', content)
-              content = re.sub(r'targetSdk\s*=.*', '', content)
-              content = re.sub(r'targetSdkVersion\s*=.*', '', content)
-              content = re.sub(r'minSdk\s*=.*', '', content)
-              content = re.sub(r'minSdkVersion\s*=.*', '', content)
+              # تحديث أو حقن compileSdk
+              if re.search(r'compileSdk\s*=', content):
+                  content = re.sub(r'compileSdk\s*=\s*.*', 'compileSdk = 36', content)
+              elif re.search(r'compileSdkVersion', content):
+                  content = re.sub(r'compileSdkVersion.*', 'compileSdkVersion = 36', content)
+              else:
+                  content = content.replace("android {", "android {\n    compileSdk = 36")
 
-              # حقن القيم الصحيحة داخل bloc الـ android {}
-              replacement = """
-                  compileSdk = 36
-                  defaultConfig {
-                      minSdk = 21
-                      targetSdk = 36
-              """
-              content = re.sub(r'android\s*\{', 'android {' + replacement, content, count=1)
+              # تحديث minSdk
+              if re.search(r'minSdk\s*=', content):
+                  content = re.sub(r'minSdk\s*=\s*.*', 'minSdk = 21', content)
+              elif re.search(r'minSdkVersion', content):
+                  content = re.sub(r'minSdkVersion.*', 'minSdkVersion = 21', content)
+
+              # تحديث targetSdk
+              if re.search(r'targetSdk\s*=', content):
+                  content = re.sub(r'targetSdk\s*=\s*.*', 'targetSdk = 36', content)
+              elif re.search(r'targetSdkVersion', content):
+                  content = re.sub(r'targetSdkVersion.*', 'targetSdkVersion = 36', content)
 
               with open(path, "w", encoding="utf-8") as f:
                   f.write(content)
-              print("Cleaned and updated build.gradle.kts successfully.")
+              print("Successfully updated build.gradle.kts safely.")
           PYEOF
 
           # إصلاح ملف AndroidManifest.xml وإزالة الـ v1 embedding
@@ -249,3 +252,4 @@ jobs:
         with:
           name: app-release-apk
           path: build/app/outputs/flutter-apk/app-release.apk
+
