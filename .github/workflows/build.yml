@@ -32,12 +32,8 @@ jobs:
           yes | sdkmanager --licenses > /dev/null || true
           sdkmanager "platforms;android-36" "build-tools;35.0.0"
 
-      # The ZIP does not contain an android/ folder, so generate it.
       - name: Generate Android project
-        shell: bash
         run: |
-          set -e
-
           if [ ! -d "android" ]; then
             flutter create \
               --platforms=android \
@@ -45,138 +41,189 @@ jobs:
               .
           fi
 
-      # IMPORTANT:
-      # Force the APP module itself to compile against Android 36.
-      # Installing SDK 36 alone is NOT enough.
-      - name: Force Android compileSdk 36
+      - name: Fix Android Gradle Configuration
         shell: bash
         run: |
           set -e
 
-          echo "========================================"
-          echo "Before patch:"
-          echo "========================================"
+          echo "======================================"
+          echo "Detecting Android Gradle files"
+          echo "======================================"
 
-          find android -type f \( -name "*.gradle" -o -name "*.gradle.kts" \) \
-            -print -exec grep -nE "compileSdk|compileSdkVersion" {} \; || true
+          find android -type f \( \
+            -name "build.gradle" \
+            -o -name "build.gradle.kts" \
+          \) -print
 
-          python3 <<'PY'
+          # -------------------------------------------------
+          # Kotlin DSL: android/app/build.gradle.kts
+          # -------------------------------------------------
+          if [ -f "android/app/build.gradle.kts" ]; then
+
+            echo "Found Kotlin DSL:"
+            echo "android/app/build.gradle.kts"
+
+            python3 <<'PY'
           from pathlib import Path
           import re
 
-          files = list(Path("android").rglob("*.gradle"))
-          files += list(Path("android").rglob("*.gradle.kts"))
+          p = Path("android/app/build.gradle.kts")
+          text = p.read_text(encoding="utf-8")
 
-          for p in files:
-              text = p.read_text(encoding="utf-8")
+          # Remove any previous/broken compileSdk declarations.
+          text = re.sub(
+              r'^[ \t]*compileSdkVersion[^\n]*\n?',
+              '',
+              text,
+              flags=re.MULTILINE
+          )
 
-              lines = text.splitlines()
-              new_lines = []
-              found = False
+          text = re.sub(
+              r'^[ \t]*compileSdk[ \t]*=[^\n]*\n?',
+              '',
+              text,
+              flags=re.MULTILINE
+          )
 
-              for line in lines:
-                  # Groovy:
-                  # compileSdk flutter.compileSdkVersion
-                  # compileSdk 33
-                  # compileSdkVersion 33
-                  if re.search(r"\bcompileSdkVersion\b", line):
-                      indent = re.match(r"\s*", line).group(0)
-                      new_lines.append(indent + "compileSdkVersion 36")
-                      found = True
-                      continue
+          text = re.sub(
+              r'^[ \t]*compileSdk[ \t]+[^\n]*\n?',
+              '',
+              text,
+              flags=re.MULTILINE
+          )
 
-                  if re.search(r"\bcompileSdk\b", line):
-                      indent = re.match(r"\s*", line).group(0)
+          # Insert the correct Kotlin DSL syntax.
+          match = re.search(r'android\s*\{', text)
 
-                      if "=" in line:
-                          new_lines.append(indent + "compileSdk = 36")
-                      else:
-                          new_lines.append(indent + "compileSdk 36")
+          if not match:
+              raise SystemExit(
+                  "ERROR: android { block not found."
+              )
 
-                      found = True
-                      continue
+          pos = match.end()
 
-                  new_lines.append(line)
+          text = (
+              text[:pos]
+              + "\n    compileSdk = 36"
+              + text[pos:]
+          )
 
-              text = "\n".join(new_lines) + "\n"
+          # Disable R8/minification if enabled.
+          text = re.sub(
+              r'isMinifyEnabled\s*=\s*true',
+              'isMinifyEnabled = false',
+              text
+          )
 
-              # app/build.gradle is the important file.
-              if p.as_posix().endswith("android/app/build.gradle"):
-                  if not found:
-                      match = re.search(r"android\s*\{", text)
-                      if match:
-                          pos = match.end()
-                          text = (
-                              text[:pos]
-                              + "\n    compileSdk 36"
-                              + text[pos:]
-                          )
+          text = re.sub(
+              r'isShrinkResources\s*=\s*true',
+              'isShrinkResources = false',
+              text
+          )
 
-                  # Disable R8/minification for release.
-                  text = re.sub(
-                      r"minifyEnabled\s+true",
-                      "minifyEnabled false",
-                      text
-                  )
+          p.write_text(text, encoding="utf-8")
 
-                  text = re.sub(
-                      r"shrinkResources\s+true",
-                      "shrinkResources false",
-                      text
-                  )
-
-              # Kotlin DSL
-              if p.as_posix().endswith("android/app/build.gradle.kts"):
-                  if not found:
-                      match = re.search(r"android\s*\{", text)
-                      if match:
-                          pos = match.end()
-                          text = (
-                              text[:pos]
-                              + "\n    compileSdk = 36"
-                              + text[pos:]
-                          )
-
-                  text = re.sub(
-                      r"isMinifyEnabled\s*=\s*true",
-                      "isMinifyEnabled = false",
-                      text
-                  )
-
-                  text = re.sub(
-                      r"isShrinkResources\s*=\s*true",
-                      "isShrinkResources = false",
-                      text
-                  )
-
-              p.write_text(text, encoding="utf-8")
-
-          print("Patched Gradle files:")
-          for p in files:
-              print(f"\n===== {p} =====")
-              print(p.read_text(encoding="utf-8"))
+          print("===== FINAL build.gradle.kts =====")
+          print(text)
           PY
 
-          # Tell Android Gradle Plugin that compileSdk 36 is intentional.
+          fi
+
+          # -------------------------------------------------
+          # Groovy: android/app/build.gradle
+          # -------------------------------------------------
+          if [ -f "android/app/build.gradle" ]; then
+
+            echo "Found Groovy:"
+            echo "android/app/build.gradle"
+
+            python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path("android/app/build.gradle")
+          text = p.read_text(encoding="utf-8")
+
+          text = re.sub(
+              r'^[ \t]*compileSdkVersion[^\n]*\n?',
+              '',
+              text,
+              flags=re.MULTILINE
+          )
+
+          text = re.sub(
+              r'^[ \t]*compileSdk[ \t]*=[^\n]*\n?',
+              '',
+              text,
+              flags=re.MULTILINE
+          )
+
+          text = re.sub(
+              r'^[ \t]*compileSdk[ \t]+[^\n]*\n?',
+              '',
+              text,
+              flags=re.MULTILINE
+          )
+
+          match = re.search(r'android\s*\{', text)
+
+          if not match:
+              raise SystemExit(
+                  "ERROR: android { block not found."
+              )
+
+          pos = match.end()
+
+          text = (
+              text[:pos]
+              + "\n    compileSdk 36"
+              + text[pos:]
+          )
+
+          text = re.sub(
+              r'minifyEnabled\s+true',
+              'minifyEnabled false',
+              text
+          )
+
+          text = re.sub(
+              r'shrinkResources\s+true',
+              'shrinkResources false',
+              text
+          )
+
+          p.write_text(text, encoding="utf-8")
+
+          print("===== FINAL build.gradle =====")
+          print(text)
+          PY
+
+          fi
+
+          # -------------------------------------------------
+          # Gradle properties
+          # -------------------------------------------------
           touch android/gradle.properties
 
-          if ! grep -q "^android.suppressUnsupportedCompileSdk=36$" \
-              android/gradle.properties; then
+          if ! grep -q \
+            "^android.suppressUnsupportedCompileSdk=36$" \
+            android/gradle.properties; then
+
             echo "android.suppressUnsupportedCompileSdk=36" \
               >> android/gradle.properties
+
           fi
 
-          echo "========================================"
-          echo "FINAL app Gradle configuration:"
-          echo "========================================"
+          echo "======================================"
+          echo "FINAL COMPILE SDK CHECK"
+          echo "======================================"
 
-          if [ -f android/app/build.gradle ]; then
-            cat android/app/build.gradle
-          fi
-
-          if [ -f android/app/build.gradle.kts ]; then
-            cat android/app/build.gradle.kts
-          fi
+          grep -RniE \
+            "compileSdk|compileSdkVersion" \
+            android/app \
+            --include="*.gradle" \
+            --include="*.gradle.kts" \
+            || true
 
       - name: Configure Firebase
         shell: bash
@@ -186,7 +233,7 @@ jobs:
           set -e
 
           if [ -z "$GOOGLE_SERVICES_JSON" ]; then
-            echo "ERROR: GitHub Secret GOOGLE_SERVICES_JSON is missing."
+            echo "ERROR: GOOGLE_SERVICES_JSON secret is missing."
             exit 1
           fi
 
@@ -195,75 +242,10 @@ jobs:
           printf '%s' "$GOOGLE_SERVICES_JSON" \
             > android/app/google-services.json
 
-          python3 <<'PY'
-          import json
-          from pathlib import Path
-
-          src = Path("android/app/google-services.json")
-          data = json.loads(src.read_text(encoding="utf-8"))
-
-          project_info = data.get("project_info", {})
-          project_number = project_info.get("project_number", "")
-          project_id = project_info.get("project_id", "")
-          storage_bucket = project_info.get("storage_bucket", "")
-
-          clients = data.get("client", [])
-          client = clients[0] if clients else {}
-
-          android_info = {}
-          for item in client.get("client_info", {}).items():
-              pass
-
-          package_name = ""
-          for item in client.get("client_info", {}).get(
-              "android_client_info", {}
-          ).items():
-              pass
-
-          android_client = client.get("client_info", {}).get(
-              "android_client_info", {}
-          )
-          package_name = android_client.get("package_name", "")
-
-          api_key = ""
-          for key in client.get("api_key", []):
-              if key.get("current_key"):
-                  api_key = key["current_key"]
-                  break
-
-          firebase_options = f'''// GENERATED FOR CI
-          // DO NOT EDIT MANUALLY.
-
-          import 'package:firebase_core/firebase_core.dart';
-
-          class DefaultFirebaseOptions {{
-            static FirebaseOptions get currentPlatform {{
-              return const FirebaseOptions(
-                apiKey: '{api_key}',
-                appId: '{client.get("client_info", {}).get("mobilesdk_app_id", "")}',
-                messagingSenderId: '{project_number}',
-                projectId: '{project_id}',
-                storageBucket: '{storage_bucket}',
-              );
-            }}
-          }}
-          '''
-
-          Path("lib/firebase_options.dart").write_text(
-              firebase_options,
-              encoding="utf-8"
-          )
-
-          print("Firebase configuration generated.")
-          print("Firebase project:", project_id)
-          print("Android package:", package_name)
-          PY
-
       - name: Get Flutter dependencies
         run: flutter pub get
 
-      - name: Remove broken default Flutter test
-        shell: bash
+      - name: Remove default test
         run: |
           rm -f test/widget_test.dart || true
 
@@ -271,43 +253,52 @@ jobs:
         run: |
           flutter analyze --no-fatal-infos
 
-      - name: Flutter clean
+      - name: Clean Flutter
         run: |
           flutter clean
           flutter pub get
 
-      - name: Verify Android configuration
+      - name: Verify compileSdk
         shell: bash
         run: |
           set -e
 
-          echo "Checking compileSdk..."
+          if [ -f "android/app/build.gradle.kts" ]; then
 
-          if [ -f android/app/build.gradle ]; then
-            grep -nE "compileSdk|compileSdkVersion" \
-              android/app/build.gradle || true
+            echo "Checking Kotlin Gradle file..."
 
-            if grep -Eq \
-              "compileSdk(Version)?[[:space:]]+(flutter\.compileSdkVersion|33)" \
-              android/app/build.gradle; then
-              echo "ERROR: app/build.gradle still uses compileSdk 33."
-              exit 1
-            fi
-          fi
+            grep -n "compileSdk" \
+              android/app/build.gradle.kts
 
-          if [ -f android/app/build.gradle.kts ]; then
-            grep -nE "compileSdk|compileSdkVersion" \
-              android/app/build.gradle.kts || true
-
-            if grep -Eq \
-              "compileSdk[[:space:]]*=[[:space:]]*(flutter\.compileSdkVersion|33)" \
+            if ! grep -q \
+              "compileSdk = 36" \
               android/app/build.gradle.kts; then
-              echo "ERROR: app/build.gradle.kts still uses compileSdk 33."
+
+              echo "ERROR: compileSdk = 36 was not found!"
               exit 1
             fi
+
+            if grep -q \
+              "compileSdkVersion" \
+              android/app/build.gradle.kts; then
+
+              echo "ERROR: Groovy compileSdkVersion syntax still exists!"
+              exit 1
+            fi
+
           fi
 
-          echo "compileSdk check passed."
+          if [ -f "android/app/build.gradle" ]; then
+
+            echo "Checking Groovy Gradle file..."
+
+            grep -nE \
+              "compileSdk|compileSdkVersion" \
+              android/app/build.gradle
+
+          fi
+
+          echo "Android compileSdk configuration OK."
 
       - name: Build Release APK
         run: |
