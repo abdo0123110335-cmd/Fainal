@@ -28,13 +28,13 @@ jobs:
         run: |
           flutter create . --platforms=android --org com.elsheikhcustoms
           
-          # فرض الإصدار 36 عبر ملف local.properties ليتم تعميمه تلقائياً على فلاتر والحزم
+          # ضبط إعدادات الإصدار في ملف local.properties
           mkdir -p android
           echo "flutter.compileSdkVersion=36" > android/local.properties
           echo "flutter.targetSdkVersion=36" >> android/local.properties
           echo "flutter.minSdkVersion=21" >> android/local.properties
 
-          # تعديل ملف بناء التطبيق الأساسي لضمان استخدام الإصدار 36 و minSdk 21
+          # تعديل ملف بناء التطبيق الرئيسي
           if [ -f android/app/build.gradle.kts ]; then
             GRADLE_FILE=android/app/build.gradle.kts
           else
@@ -48,49 +48,37 @@ jobs:
           sed -i 's/targetSdkVersion.*/targetSdkVersion 36/g' "$GRADLE_FILE" || true
           sed -i 's/targetSdk = .*/targetSdk = 36/g' "$GRADLE_FILE" || true
 
-          # حقن كود لرفع إصدار الـ subprojects (مثل share_plus) إلى 36 لمنع خطأ AAR Metadata
+          # الحل النهائي: حقن كود Groovy لفرض compileSdk 36 على جميع الحزم والـ Subprojects لمنع خطأ share_plus
           python3 - << 'PYEOF'
           import os
 
-          root_kts = "android/build.gradle.kts"
-          root_groovy = "android/build.gradle"
+          groovy_build = "android/build.gradle"
+          
+          # إذا لم يكن موجوداً، نقوم بإنشائه لضمان عمل كود الـ subprojects بشكل صحيح
+          if not os.path.exists(groovy_build):
+              with open(groovy_build, "w", encoding="utf-8") as f:
+                  f.write("allprojects {\n    repositories {\n        google()\n        mavenCentral()\n    }\n}\n")
 
-          override_code_kts = """
+          forced_config = """
           subprojects {
               afterEvaluate { project ->
-                  if (project.hasProperty("android")) {
-                      val androidExt = project.extensions.findByName("android")
-                      try {
-                          androidExt?.javaClass?.getMethod("compileSdkVersion", Int::class.java)?.invoke(androidExt, 36)
-                      } catch (e: Exception) {}
-                      try {
-                          androidExt?.javaClass?.getMethod("setCompileSdk", Int::class.java)?.invoke(androidExt, 36)
-                      } catch (e: Exception) {}
-                  }
-              }
-          }
-          """
-
-          if os.path.exists(root_kts):
-              with open(root_kts, "r", encoding="utf-8") as f:
-                  content = f.read()
-              if "subprojects" not in content:
-                  with open(root_kts, "a", encoding="utf-8") as f:
-                      f.write("\n" + override_code_kts)
-          elif os.path.exists(root_groovy):
-              override_code_groovy = """
-              subprojects {
-                  afterEvaluate { project ->
-                      if (project.hasProperty('android')) {
-                          project.android {
+                  if (project.hasProperty('android')) {
+                      project.android {
+                          if (compileSdkVersion == null || compileSdkVersion.toString() < '33' || compileSdkVersion.toString() == 'android-33') {
                               compileSdkVersion 36
+                          }
+                          if (namespace == null) {
+                              // تجنب أي نقص في النطاقات القديمة
                           }
                       }
                   }
               }
-              """
-              with open(root_groovy, "a", encoding="utf-8") as f:
-                  f.write("\n" + override_code_groovy)
+          }
+          """
+          
+          with open(groovy_build, "a", encoding="utf-8") as f:
+              f.write(forced_config)
+          print("Successfully injected forced subprojects configuration into build.gradle")
           PYEOF
 
       - name: Write Firebase configuration (google-services.json + firebase_options.dart)
@@ -223,3 +211,4 @@ jobs:
         with:
           name: app-release-apk
           path: build/app/outputs/flutter-apk/app-release.apk
+
