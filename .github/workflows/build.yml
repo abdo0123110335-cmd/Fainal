@@ -26,13 +26,11 @@ jobs:
 
       - name: Configure Android SDK Version & Subprojects
         run: |
-          # بدلاً من إعادة إنشاء مجلد الأندرويد بالكامل وتخريب المسارات، نقوم بتعديل الملفات الحالية مباشرة
           mkdir -p android
           echo "flutter.compileSdkVersion=36" > android/local.properties
           echo "flutter.targetSdkVersion=36" >> android/local.properties
           echo "flutter.minSdkVersion=21" >> android/local.properties
 
-          # تعديل ملف بناء التطبيق الرئيسي لضمان استخدام الإصدار 36
           APP_GRADLE="android/app/build.gradle.kts"
           if [ ! -f "$APP_GRADLE" ]; then
             APP_GRADLE="android/app/build.gradle"
@@ -45,7 +43,6 @@ jobs:
           sed -i 's/targetSdkVersion.*/targetSdkVersion 36/g' "$APP_GRADLE" || true
           sed -i 's/targetSdk = .*/targetSdk = 36/g' "$APP_GRADLE" || true
 
-          # حقن كود Groovy لفرض compileSdk 36 على جميع الحزم والـ Subprojects لمنع خطأ share_plus
           GROOVY_BUILD="android/build.gradle"
           if [ ! -f "$GROOVY_BUILD" ]; then
             echo "allprojects { repositories { google() mavenCentral() } }" > "$GROOVY_BUILD"
@@ -73,6 +70,9 @@ jobs:
             echo "::error::سر GOOGLE_SERVICES_JSON غير موجود في مستودع GitHub."
             exit 1
           fi
+          
+          # إنشاء المجلد أولاً لتجنب خطأ No such file or directory
+          mkdir -p android/app
           echo "$GOOGLE_SERVICES_JSON" > android/app/google-services.json
 
           python3 - << 'PYEOF'
@@ -145,12 +145,13 @@ jobs:
       - name: Add camera & storage permissions to AndroidManifest
         run: |
           MANIFEST=android/app/src/main/AndroidManifest.xml
-          if ! grep -q "android.permission.CAMERA" "$MANIFEST"; then
+          if [ -f "$MANIFEST" ] && ! grep -q "android.permission.CAMERA" "$MANIFEST"; then
             sed -i '/<manifest xmlns:android/a\    <uses-permission android:name="android.permission.CAMERA" />\n    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />\n    <uses-permission android:name="android.permission.INTERNET" />\n    <uses-feature android:name="android.hardware.camera" android:required="false" />\n    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />' "$MANIFEST"
           fi
 
       - name: Add ProGuard rules for ML Kit text recognition
         run: |
+          mkdir -p android/app
           PROGUARD=android/app/proguard-rules.pro
           touch "$PROGUARD"
           cat >> "$PROGUARD" << 'EOF'
@@ -167,21 +168,22 @@ jobs:
           python3 - << 'PYEOF'
           import os, re
           path = "android/app/build.gradle.kts" if os.path.exists("android/app/build.gradle.kts") else "android/app/build.gradle"
-          is_kts = path.endswith(".kts")
-          with open(path, "r", encoding="utf-8") as f: content = f.read()
-          if is_kts:
-              content = re.sub(r"isMinifyEnabled\s*=\s*true", "isMinifyEnabled = false", content)
-              content = re.sub(r"isShrinkResources\s*=\s*true", "isShrinkResources = false", content)
-              if "isMinifyEnabled" not in content:
-                  match = re.search(r"release\s*\{", content)
-                  if match: content = content[:match.end()] + "\n            isMinifyEnabled = false\n            isShrinkResources = false" + content[match.end():]
-          else:
-              content = re.sub(r"minifyEnabled\s+true", "minifyEnabled false", content)
-              content = re.sub(r"shrinkResources\s+true", "shrinkResources false", content)
-              if "minifyEnabled" not in content:
-                  match = re.search(r"release\s*\{", content)
-                  if match: content = content[:match.end()] + "\n            minifyEnabled false\n            shrinkResources false" + content[match.end():]
-          with open(path, "w", encoding="utf-8") as f: f.write(content)
+          if os.path.exists(path):
+              is_kts = path.endswith(".kts")
+              with open(path, "r", encoding="utf-8") as f: content = f.read()
+              if is_kts:
+                  content = re.sub(r"isMinifyEnabled\s*=\s*true", "isMinifyEnabled = false", content)
+                  content = re.sub(r"isShrinkResources\s*=\s*true", "isShrinkResources = false", content)
+                  if "isMinifyEnabled" not in content:
+                      match = re.search(r"release\s*\{", content)
+                      if match: content = content[:match.end()] + "\n            isMinifyEnabled = false\n            isShrinkResources = false" + content[match.end():]
+              else:
+                  content = re.sub(r"minifyEnabled\s+true", "minifyEnabled false", content)
+                  content = re.sub(r"shrinkResources\s+true", "shrinkResources false", content)
+                  if "minifyEnabled" not in content:
+                      match = re.search(r"release\s*\{", content)
+                      if match: content = content[:match.end()] + "\n            minifyEnabled false\n            shrinkResources false" + content[match.end():]
+              with open(path, "w", encoding="utf-8") as f: f.write(content)
           PYEOF
 
       - name: Get Dependencies
@@ -194,7 +196,6 @@ jobs:
         run: |
           mkdir -p build/app/outputs/flutter-apk/
           if [ ! -f "build/app/outputs/flutter-apk/app-release.apk" ]; then
-            find . -name "*.apk"
             FOUND_APK=$(find . -path "*/build/app/outputs/apk/release/*.apk" -o -name "app-release.apk" | head -n 1)
             if [ -n "$FOUND_APK" ]; then
               cp "$FOUND_APK" build/app/outputs/flutter-apk/app-release.apk
@@ -206,3 +207,4 @@ jobs:
         with:
           name: app-release-apk
           path: build/app/outputs/flutter-apk/app-release.apk
+
