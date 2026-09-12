@@ -23,23 +23,17 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Prepare Android project
+      - name: Generate Android project
         shell: bash
         run: |
           set -e
           flutter --version
 
-          # The uploaded project contains the Flutter/Dart source but may not
-          # contain the generated Android folder. Create it if necessary.
           if [ ! -d "android" ]; then
-            flutter create \
-              --platforms=android \
-              --org com.elsheikhcustoms \
-              --project-name elsheikh_customs_app \
-              .
+            flutter create --platforms=android --project-name elsheikh_customs_app .
           fi
 
-      - name: Configure Firebase from GitHub Secret
+      - name: Configure Firebase and Android
         env:
           GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
         shell: bash
@@ -47,104 +41,99 @@ jobs:
           set -e
 
           if [ -z "$GOOGLE_SERVICES_JSON" ]; then
-            echo "ERROR: GitHub Actions secret GOOGLE_SERVICES_JSON is missing."
-            echo "Add the complete google-services.json content as:"
-            echo "Settings -> Secrets and variables -> Actions -> New repository secret"
+            echo "ERROR: Missing GitHub Secret GOOGLE_SERVICES_JSON"
             exit 1
           fi
 
           mkdir -p android/app
           printf '%s' "$GOOGLE_SERVICES_JSON" > android/app/google-services.json
 
-          # Generate lib/firebase_options.dart from google-services.json.
           python3 - <<'PY'
           import json
+          import re
           from pathlib import Path
 
-          src = Path("android/app/google-services.json")
-          data = json.loads(src.read_text(encoding="utf-8"))
-
+          data = json.loads(Path("android/app/google-services.json").read_text())
           project = data["project_info"]
           client = data["client"][0]
-          app = client["client_info"]
-          android_info = app["android_client_info"]
+          ci = client["client_info"]
+          android = ci["android_client_info"]
 
-          package_name = android_info["package_name"]
-          if package_name != "com.elsheikhcustoms.elsheikh_customs_app":
-              raise SystemExit(
-                  f"Firebase Android package mismatch: {package_name}\n"
-                  "Expected: com.elsheikhcustoms.elsheikh_customs_app"
-              )
-
+          package_name = android["package_name"]
           api_key = client["api_key"][0]["current_key"]
           project_id = project["project_id"]
           sender_id = project["project_number"]
-          app_id = app["mobilesdk_app_id"]
+          app_id = ci["mobilesdk_app_id"]
           storage_bucket = project.get("storage_bucket") or f"{project_id}.appspot.com"
 
-          dart = f"""import 'package:firebase_core/firebase_core.dart' show FirebaseOptions; import 'package:flutter/foundation.dart' show defaultTargetPlatform, kIsWeb, TargetPlatform; class DefaultFirebaseOptions {{ static FirebaseOptions get currentPlatform {{ if (kIsWeb) {{ throw UnsupportedError( 'This app is configured for Android only.', ); }} switch (defaultTargetPlatform) {{ case TargetPlatform.android: return android; default: throw UnsupportedError( 'This app is configured for Android only.', ); }} }} static const FirebaseOptions android = FirebaseOptions( apiKey: {api_key!r}, appId: {app_id!r}, messagingSenderId: {sender_id!r}, projectId: {project_id!r}, storageBucket: {storage_bucket!r}, ); }} """
-          # Fix Python repr quoting for Dart single-quoted strings.
-          for value in [api_key, app_id, sender_id, project_id, storage_bucket]:
-              if "'" in value:
-                  raise SystemExit("Firebase value contains an unsupported single quote.")
+          print("Firebase project:", project_id)
+          print("Android package:", package_name)
 
-          dart = dart.replace(f"'{api_key!r}'", f"'{api_key}'")
-          dart = dart.replace(f"'{app_id!r}'", f"'{app_id}'")
-          dart = dart.replace(f"'{sender_id!r}'", f"'{sender_id}'")
-          dart = dart.replace(f"'{project_id!r}'", f"'{project_id}'")
-          dart = dart.replace(f"'{storage_bucket!r}'", f"'{storage_bucket}'")
+          # Configure the package/namespace in either Gradle format.
+          groovy = Path("android/app/build.gradle")
+          kotlin = Path("android/app/build.gradle.kts")
 
-          Path("lib/firebase_options.dart").write_text(dart, encoding="utf-8")
-          print(f"Firebase configured for project: {project_id}")
-          print(f"Android package: {package_name}")
-          PY
-
-      - name: Configure Google Services Gradle plugin
-        shell: bash
-        run: |
-          set -e
-
-          # Add the Google Services plugin to the Android buildscript when
-          # using the traditional Flutter Groovy Gradle template.
-          if [ -f "android/build.gradle" ]; then
-            if ! grep -q "com.google.gms:google-services" android/build.gradle; then
-              python3 - <<'PY'
-          from pathlib import Path
-          p = Path("android/build.gradle")
-          s = p.read_text()
-          line = " classpath 'com.google.gms:google-services:4.4.2'\n"
-          if "dependencies {" in s:
-              s = s.replace("dependencies {", "dependencies {\n" + line, 1)
+          if groovy.exists():
+              p = groovy
+              s = p.read_text()
+              s = re.sub(r'namespace\\s+[\'"][^\'"]+[\'"]',
+                         f'namespace "{package_name}"', s, count=1)
+              s = re.sub(r'applicationId\\s+[\'"][^\'"]+[\'"]',
+                         f'applicationId "{package_name}"', s, count=1)
+              # Flutter generated projects normally use flutter.compileSdkVersion.
+              s = re.sub(r'compileSdk\\s+flutter\\.compileSdkVersion',
+                         'compileSdk 36', s, count=1)
+              s = re.sub(r'compileSdkVersion\\s+flutter\\.compileSdkVersion',
+                         'compileSdkVersion 36', s, count=1)
+              p.write_text(s)
+          elif kotlin.exists():
+              p = kotlin
+              s = p.read_text()
+              s = re.sub(r'namespace\\s*=\\s*"[^"]+"',
+                         f'namespace = "{package_name}"', s, count=1)
+              s = re.sub(r'applicationId\\s*=\\s*"[^"]+"',
+                         f'applicationId = "{package_name}"', s, count=1)
+              s = re.sub(r'compileSdk\\s*=\\s*flutter\\.compileSdkVersion',
+                         'compileSdk = 36', s, count=1)
+              p.write_text(s)
           else:
-              raise SystemExit("android/build.gradle does not contain a dependencies block")
-          p.write_text(s)
-          PY
-            fi
-          fi
+              raise SystemExit("Android app Gradle file was not found")
 
-          # Apply the plugin in app-level Gradle.
-          if [ -f "android/app/build.gradle" ]; then
-            if ! grep -q "com.google.gms.google-services" android/app/build.gradle; then
-              printf '\napply plugin: "com.google.gms.google-services"\n' >> android/app/build.gradle
-            fi
-          fi
+          # Update AndroidManifest package only if an old package declaration exists.
+          manifest = Path("android/app/src/main/AndroidManifest.xml")
+          if manifest.exists():
+              s = manifest.read_text()
+              s = re.sub(r'package="[^"]+"', f'package="{package_name}"', s, count=1)
+              manifest.write_text(s)
+
+          # Firebase Flutter options are supplied directly to firebase_core,
+          # so the Google Services Gradle plugin is not required here.
+          def dart_string(v):
+              return "'" + str(v).replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+          dart = f"""import 'package:firebase_core/firebase_core.dart' show FirebaseOptions; import 'package:flutter/foundation.dart' show defaultTargetPlatform, kIsWeb, TargetPlatform; class DefaultFirebaseOptions {{ static FirebaseOptions get currentPlatform {{ if (kIsWeb) {{ throw UnsupportedError('This app is configured for Android only.'); }} switch (defaultTargetPlatform) {{ case TargetPlatform.android: return android; default: throw UnsupportedError('This app is configured for Android only.'); }} }} static const FirebaseOptions android = FirebaseOptions( apiKey: {dart_string(api_key)}, appId: {dart_string(app_id)}, messagingSenderId: {dart_string(sender_id)}, projectId: {dart_string(project_id)}, storageBucket: {dart_string(storage_bucket)}, ); }} """
+          Path("lib/firebase_options.dart").write_text(dart, encoding="utf-8")
+          PY
 
       - name: Install dependencies
         run: flutter pub get
 
-      - name: Remove Flutter template test
+      - name: Analyze Dart code
         shell: bash
         run: |
-          # flutter create can generate the default widget_test.dart.
-          # It references MyApp, while this project uses its own app root.
-          # It is not part of the production APK, so remove the template test.
-          rm -rf test
-
-      - name: Analyze
-        run: flutter analyze --no-fatal-infos
+          set -e
+          # The repository does not contain a real widget test; avoid the
+          # template test generated by `flutter create`.
+          rm -f test/widget_test.dart
+          flutter analyze --no-fatal-infos
 
       - name: Build release APK
-        run: flutter build apk --release
+        shell: bash
+        run: |
+          set -e
+          # --no-shrink avoids R8 removing/looking for optional ML Kit
+          # language classes that are not used by this application.
+          flutter build apk --release --no-shrink
 
       - name: Rename APK
         shell: bash
