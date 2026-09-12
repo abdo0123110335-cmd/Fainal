@@ -24,7 +24,7 @@ jobs:
         with:
           channel: 'stable'
 
-      - name: Regenerate Android Project & Fix v1 Embedding
+      - name: Regenerate Android Project & Clean SDK Config
         run: |
           flutter create . --platforms=android --org com.elsheikhcustoms
 
@@ -33,27 +33,38 @@ jobs:
           echo "flutter.targetSdkVersion=36" >> android/local.properties
           echo "flutter.minSdkVersion=21" >> android/local.properties
 
-          # تعديل ملفات بناء التطبيق لضمان اعتماد SDK 36
+          # تعديل ملف build.gradle.kts بشكل نظيف وآمن لتجنب تداخل الرموز
           python3 - << 'PYEOF'
           import os, re
 
-          for path in ["android/app/build.gradle.kts", "android/app/build.gradle"]:
-              if os.path.exists(path):
-                  with open(path, "r", encoding="utf-8") as f:
-                      content = f.read()
-                  
-                  content = re.sub(r'minSdkVersion\s*=?\s*\d+', 'minSdkVersion 21', content)
-                  content = re.sub(r'minSdk\s*=\s*\d+', 'minSdk = 21', content)
-                  content = re.sub(r'compileSdkVersion\s*=?\s*[\w\d"-]+', 'compileSdkVersion 36', content)
-                  content = re.sub(r'compileSdk\s*=\s*\d+', 'compileSdk = 36', content)
-                  content = re.sub(r'targetSdkVersion\s*=?\s*\d+', 'targetSdkVersion 36', content)
-                  content = re.sub(r'targetSdk\s*=\s*\d+', 'targetSdk = 36', content)
+          path = "android/app/build.gradle.kts"
+          if os.path.exists(path):
+              with open(path, "r", encoding="utf-8") as f:
+                  content = f.read()
 
-                  with open(path, "w", encoding="utf-8") as f:
-                      f.write(content)
+              # إزالة الأسطر القديمة الخاصة بالـ SDK لمنع التداخل
+              content = re.sub(r'compileSdk\s*=.*', '', content)
+              content = re.sub(r'compileSdkVersion\s*=.*', '', content)
+              content = re.sub(r'targetSdk\s*=.*', '', content)
+              content = re.sub(r'targetSdkVersion\s*=.*', '', content)
+              content = re.sub(r'minSdk\s*=.*', '', content)
+              content = re.sub(r'minSdkVersion\s*=.*', '', content)
+
+              # حقن القيم الصحيحة داخل bloc الـ android {}
+              replacement = """
+                  compileSdk = 36
+                  defaultConfig {
+                      minSdk = 21
+                      targetSdk = 36
+              """
+              content = re.sub(r'android\s*\{', 'android {' + replacement, content, count=1)
+
+              with open(path, "w", encoding="utf-8") as f:
+                  f.write(content)
+              print("Cleaned and updated build.gradle.kts successfully.")
           PYEOF
 
-          # إصلاح ملف AndroidManifest.xml وإزالة الـ v1 embedding نهائياً لضمان عدم حدوث الخطأ
+          # إصلاح ملف AndroidManifest.xml وإزالة الـ v1 embedding
           python3 - << 'PYEOF'
           import os, re
 
@@ -62,18 +73,14 @@ jobs:
               with open(manifest_path, "r", encoding="utf-8") as f:
                   content = f.read()
 
-              # إزالة التطبيق القديم v1 إن وجد
               content = re.sub(r'android:name="io\.flutter\.app\.FlutterApplication"', '', content)
               
-              # التأكد من وجود flutterEmbedding v2
               if "flutterEmbedding" not in content:
                   content = content.replace("<application", '<application\n        android:name="${applicationName}"')
-                  # إضافة الـ meta-data قبل إغلاق الوسم
                   content = re.sub(r'(</application>)', r'    <meta-data\n        android:name="flutterEmbedding"\n        android:value="2" />\n\1', content)
 
               with open(manifest_path, "w", encoding="utf-8") as f:
                   f.write(content)
-              print("AndroidManifest.xml successfully updated to v2 embedding.")
           PYEOF
 
           # ضبط إعدادات الـ Subprojects لـ share_plus
