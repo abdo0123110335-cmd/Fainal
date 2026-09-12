@@ -24,14 +24,16 @@ jobs:
         with:
           channel: 'stable'
 
-      - name: Configure Android SDK Version & Subprojects
+      - name: Regenerate Android Project & Fix v1 Embedding
         run: |
+          flutter create . --platforms=android --org com.elsheikhcustoms
+
           mkdir -p android/app
           echo "flutter.compileSdkVersion=36" > android/local.properties
           echo "flutter.targetSdkVersion=36" >> android/local.properties
           echo "flutter.minSdkVersion=21" >> android/local.properties
 
-          # تعديل ملف بناء التطبيق الرئيسي بأمان
+          # تعديل ملفات بناء التطبيق لضمان اعتماد SDK 36
           python3 - << 'PYEOF'
           import os, re
 
@@ -51,7 +53,30 @@ jobs:
                       f.write(content)
           PYEOF
 
-          # كتابة ملف android/build.gradle بشكل قياسي وصحيح تماماً لتجنب أي أخطاء في الـ Syntax
+          # إصلاح ملف AndroidManifest.xml وإزالة الـ v1 embedding نهائياً لضمان عدم حدوث الخطأ
+          python3 - << 'PYEOF'
+          import os, re
+
+          manifest_path = "android/app/src/main/AndroidManifest.xml"
+          if os.path.exists(manifest_path):
+              with open(manifest_path, "r", encoding="utf-8") as f:
+                  content = f.read()
+
+              # إزالة التطبيق القديم v1 إن وجد
+              content = re.sub(r'android:name="io\.flutter\.app\.FlutterApplication"', '', content)
+              
+              # التأكد من وجود flutterEmbedding v2
+              if "flutterEmbedding" not in content:
+                  content = content.replace("<application", '<application\n        android:name="${applicationName}"')
+                  # إضافة الـ meta-data قبل إغلاق الوسم
+                  content = re.sub(r'(</application>)', r'    <meta-data\n        android:name="flutterEmbedding"\n        android:value="2" />\n\1', content)
+
+              with open(manifest_path, "w", encoding="utf-8") as f:
+                  f.write(content)
+              print("AndroidManifest.xml successfully updated to v2 embedding.")
+          PYEOF
+
+          # ضبط إعدادات الـ Subprojects لـ share_plus
           cat << 'EOF' > android/build.gradle
           allprojects {
               repositories {
@@ -193,7 +218,7 @@ jobs:
                       if "minifyEnabled" not in content:
                           match = re.search(r"release\s*\{", content)
                           if match: content = content[:match.end()] + "\n            minifyEnabled false\n            shrinkResources false" + content[match.end():]
-                  with open(path, "w", encoding="utf-8") as f: f.write(content)
+                  with open(path, "w", encoding="utf-8") as f: content = f.write(content)
           PYEOF
 
       - name: Get Dependencies
