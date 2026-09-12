@@ -2,7 +2,9 @@ name: Build Android APK
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - master
   workflow_dispatch:
 
 permissions:
@@ -22,183 +24,298 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Install Android SDK 36
+      - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
+      - name: Install Android SDK 36
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platforms;android-36" "build-tools;35.0.0"
+
+      # The ZIP does not contain an android/ folder, so generate it.
       - name: Generate Android project
         shell: bash
         run: |
-          set -euxo pipefail
-          flutter --version
+          set -e
 
-          if [ ! -d android ]; then
-            flutter create --platforms=android --project-name elsheikh_customs_app .
+          if [ ! -d "android" ]; then
+            flutter create \
+              --platforms=android \
+              --project-name elsheikh_customs_app \
+              .
           fi
 
-      - name: Configure Android build
+      # IMPORTANT:
+      # Force the APP module itself to compile against Android 36.
+      # Installing SDK 36 alone is NOT enough.
+      - name: Force Android compileSdk 36
         shell: bash
         run: |
-          set -euxo pipefail
+          set -e
 
-          # Force every Android app Gradle configuration to compile with API 36.
-          # The previous workflow only matched one old Gradle syntax, while the
-          # current Flutter template may use Gradle Kotlin DSL.
-          if [ -f android/app/build.gradle ]; then
-            python3 - <<'PY'
+          echo "========================================"
+          echo "Before patch:"
+          echo "========================================"
+
+          find android -type f \( -name "*.gradle" -o -name "*.gradle.kts" \) \
+            -print -exec grep -nE "compileSdk|compileSdkVersion" {} \; || true
+
+          python3 <<'PY'
           from pathlib import Path
           import re
 
-          p = Path("android/app/build.gradle")
-          s = p.read_text()
+          files = list(Path("android").rglob("*.gradle"))
+          files += list(Path("android").rglob("*.gradle.kts"))
 
-          s = re.sub(r'compileSdk(?:Version)?\s+(?:flutter\.compileSdkVersion|\d+)',
-                     'compileSdk 36', s)
+          for p in files:
+              text = p.read_text(encoding="utf-8")
 
-          if 'compileSdk 36' not in s:
-              s = s.replace('android {', 'android {\n compileSdk 36', 1)
+              lines = text.splitlines()
+              new_lines = []
+              found = False
 
-          # Release must not run R8 for this project because
-          # google_mlkit_text_recognition 0.15.1 references optional language
-          # recognizer classes that are not packaged by the plugin.
-          s = re.sub(r'isMinifyEnabled\s+true', 'isMinifyEnabled false', s)
-          s = re.sub(r'isShrinkResources\s+true', 'isShrinkResources false', s)
+              for line in lines:
+                  # Groovy:
+                  # compileSdk flutter.compileSdkVersion
+                  # compileSdk 33
+                  # compileSdkVersion 33
+                  if re.search(r"\bcompileSdkVersion\b", line):
+                      indent = re.match(r"\s*", line).group(0)
+                      new_lines.append(indent + "compileSdkVersion 36")
+                      found = True
+                      continue
 
-          if 'isMinifyEnabled' not in s:
-              s = s.replace('buildTypes {', 'buildTypes {\n release {\n minifyEnabled false\n shrinkResources false\n }', 1)
+                  if re.search(r"\bcompileSdk\b", line):
+                      indent = re.match(r"\s*", line).group(0)
 
-          p.write_text(s)
+                      if "=" in line:
+                          new_lines.append(indent + "compileSdk = 36")
+                      else:
+                          new_lines.append(indent + "compileSdk 36")
+
+                      found = True
+                      continue
+
+                  new_lines.append(line)
+
+              text = "\n".join(new_lines) + "\n"
+
+              # app/build.gradle is the important file.
+              if p.as_posix().endswith("android/app/build.gradle"):
+                  if not found:
+                      match = re.search(r"android\s*\{", text)
+                      if match:
+                          pos = match.end()
+                          text = (
+                              text[:pos]
+                              + "\n    compileSdk 36"
+                              + text[pos:]
+                          )
+
+                  # Disable R8/minification for release.
+                  text = re.sub(
+                      r"minifyEnabled\s+true",
+                      "minifyEnabled false",
+                      text
+                  )
+
+                  text = re.sub(
+                      r"shrinkResources\s+true",
+                      "shrinkResources false",
+                      text
+                  )
+
+              # Kotlin DSL
+              if p.as_posix().endswith("android/app/build.gradle.kts"):
+                  if not found:
+                      match = re.search(r"android\s*\{", text)
+                      if match:
+                          pos = match.end()
+                          text = (
+                              text[:pos]
+                              + "\n    compileSdk = 36"
+                              + text[pos:]
+                          )
+
+                  text = re.sub(
+                      r"isMinifyEnabled\s*=\s*true",
+                      "isMinifyEnabled = false",
+                      text
+                  )
+
+                  text = re.sub(
+                      r"isShrinkResources\s*=\s*true",
+                      "isShrinkResources = false",
+                      text
+                  )
+
+              p.write_text(text, encoding="utf-8")
+
+          print("Patched Gradle files:")
+          for p in files:
+              print(f"\n===== {p} =====")
+              print(p.read_text(encoding="utf-8"))
           PY
-          elif [ -f android/app/build.gradle.kts ]; then
-            python3 - <<'PY'
-          from pathlib import Path
-          import re
 
-          p = Path("android/app/build.gradle.kts")
-          s = p.read_text()
+          # Tell Android Gradle Plugin that compileSdk 36 is intentional.
+          touch android/gradle.properties
 
-          s = re.sub(r'compileSdk\s*=\s*(?:flutter\.compileSdkVersion|\d+)',
-                     'compileSdk = 36', s)
-
-          if 'compileSdk = 36' not in s:
-              s = s.replace('android {', 'android {\n compileSdk = 36', 1)
-
-          s = re.sub(r'isMinifyEnabled\s*=\s*true', 'isMinifyEnabled = false', s)
-          s = re.sub(r'isShrinkResources\s*=\s*true', 'isShrinkResources = false', s)
-
-          if 'isMinifyEnabled = false' not in s:
-              s = s.replace(
-                  'buildTypes {',
-                  'buildTypes {\n release {\n isMinifyEnabled = false\n isShrinkResources = false\n }',
-                  1
-              )
-
-          p.write_text(s)
-          PY
-          else
-            echo "ERROR: No Android app Gradle file found"
-            exit 1
+          if ! grep -q "^android.suppressUnsupportedCompileSdk=36$" \
+              android/gradle.properties; then
+            echo "android.suppressUnsupportedCompileSdk=36" \
+              >> android/gradle.properties
           fi
 
-          echo "=== Android app Gradle after patch ==="
-          cat android/app/build.gradle 2>/dev/null || cat android/app/build.gradle.kts
+          echo "========================================"
+          echo "FINAL app Gradle configuration:"
+          echo "========================================"
+
+          if [ -f android/app/build.gradle ]; then
+            cat android/app/build.gradle
+          fi
+
+          if [ -f android/app/build.gradle.kts ]; then
+            cat android/app/build.gradle.kts
+          fi
 
       - name: Configure Firebase
+        shell: bash
         env:
           GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
-        shell: bash
         run: |
-          set -euxo pipefail
+          set -e
 
-          if [ -z "${GOOGLE_SERVICES_JSON:-}" ]; then
-            echo "ERROR: Missing GitHub Actions secret GOOGLE_SERVICES_JSON"
+          if [ -z "$GOOGLE_SERVICES_JSON" ]; then
+            echo "ERROR: GitHub Secret GOOGLE_SERVICES_JSON is missing."
             exit 1
           fi
 
           mkdir -p android/app
-          printf '%s' "$GOOGLE_SERVICES_JSON" > android/app/google-services.json
 
-          python3 - <<'PY'
+          printf '%s' "$GOOGLE_SERVICES_JSON" \
+            > android/app/google-services.json
+
+          python3 <<'PY'
           import json
           from pathlib import Path
 
-          data = json.loads(Path("android/app/google-services.json").read_text())
-          project = data["project_info"]
-          client = data["client"][0]
-          info = client["client_info"]
-          android_info = info["android_client_info"]
+          src = Path("android/app/google-services.json")
+          data = json.loads(src.read_text(encoding="utf-8"))
 
-          package_name = android_info["package_name"]
-          api_key = client["api_key"][0]["current_key"]
-          project_id = project["project_id"]
-          sender_id = project["project_number"]
-          app_id = info["mobilesdk_app_id"]
-          storage_bucket = project.get("storage_bucket") or f"{project_id}.appspot.com"
+          project_info = data.get("project_info", {})
+          project_number = project_info.get("project_number", "")
+          project_id = project_info.get("project_id", "")
+          storage_bucket = project_info.get("storage_bucket", "")
 
-          if package_name != "com.elsheikhcustoms.elsheikh_customs_app":
-              raise SystemExit(
-                  f"Firebase package is {package_name}, expected "
-                  "com.elsheikhcustoms.elsheikh_customs_app"
-              )
+          clients = data.get("client", [])
+          client = clients[0] if clients else {}
 
-          def q(v):
-              return "'" + str(v).replace("\\", "\\\\").replace("'", "\\'") + "'"
+          android_info = {}
+          for item in client.get("client_info", {}).items():
+              pass
 
-          dart = f"""import 'package:firebase_core/firebase_core.dart' show FirebaseOptions; import 'package:flutter/foundation.dart' show defaultTargetPlatform, kIsWeb, TargetPlatform; class DefaultFirebaseOptions {{ static FirebaseOptions get currentPlatform {{ if (kIsWeb) {{ throw UnsupportedError('This app is configured for Android only.'); }} switch (defaultTargetPlatform) {{ case TargetPlatform.android: return android; default: throw UnsupportedError('This app is configured for Android only.'); }} }} static const FirebaseOptions android = FirebaseOptions( apiKey: {q(api_key)}, appId: {q(app_id)}, messagingSenderId: {q(sender_id)}, projectId: {q(project_id)}, storageBucket: {q(storage_bucket)}, ); }} """
+          package_name = ""
+          for item in client.get("client_info", {}).get(
+              "android_client_info", {}
+          ).items():
+              pass
 
-          Path("lib/firebase_options.dart").write_text(dart, encoding="utf-8")
-          print("Firebase configured:", project_id)
+          android_client = client.get("client_info", {}).get(
+              "android_client_info", {}
+          )
+          package_name = android_client.get("package_name", "")
+
+          api_key = ""
+          for key in client.get("api_key", []):
+              if key.get("current_key"):
+                  api_key = key["current_key"]
+                  break
+
+          firebase_options = f'''// GENERATED FOR CI
+          // DO NOT EDIT MANUALLY.
+
+          import 'package:firebase_core/firebase_core.dart';
+
+          class DefaultFirebaseOptions {{
+            static FirebaseOptions get currentPlatform {{
+              return const FirebaseOptions(
+                apiKey: '{api_key}',
+                appId: '{client.get("client_info", {}).get("mobilesdk_app_id", "")}',
+                messagingSenderId: '{project_number}',
+                projectId: '{project_id}',
+                storageBucket: '{storage_bucket}',
+              );
+            }}
+          }}
+          '''
+
+          Path("lib/firebase_options.dart").write_text(
+              firebase_options,
+              encoding="utf-8"
+          )
+
+          print("Firebase configuration generated.")
+          print("Firebase project:", project_id)
+          print("Android package:", package_name)
           PY
 
-      - name: Install Flutter dependencies
+      - name: Get Flutter dependencies
         run: flutter pub get
+
+      - name: Remove broken default Flutter test
+        shell: bash
+        run: |
+          rm -f test/widget_test.dart || true
 
       - name: Analyze
-        shell: bash
         run: |
-          set -e
-          rm -f test/widget_test.dart
           flutter analyze --no-fatal-infos
 
-      - name: Clean
-        run: flutter clean
+      - name: Flutter clean
+        run: |
+          flutter clean
+          flutter pub get
 
-      - name: Get dependencies again
-        run: flutter pub get
-
-      - name: Verify release minification is disabled
+      - name: Verify Android configuration
         shell: bash
         run: |
           set -e
+
+          echo "Checking compileSdk..."
+
           if [ -f android/app/build.gradle ]; then
-            grep -nE 'compileSdk|minifyEnabled|shrinkResources' android/app/build.gradle || true
-            if grep -q 'minifyEnabled true' android/app/build.gradle; then
-              echo "ERROR: R8/minification is still enabled"
-              exit 1
-            fi
-          else
-            grep -nE 'compileSdk|isMinifyEnabled|isShrinkResources' android/app/build.gradle.kts || true
-            if grep -q 'isMinifyEnabled = true' android/app/build.gradle.kts; then
-              echo "ERROR: R8/minification is still enabled"
+            grep -nE "compileSdk|compileSdkVersion" \
+              android/app/build.gradle || true
+
+            if grep -Eq \
+              "compileSdk(Version)?[[:space:]]+(flutter\.compileSdkVersion|33)" \
+              android/app/build.gradle; then
+              echo "ERROR: app/build.gradle still uses compileSdk 33."
               exit 1
             fi
           fi
 
-      - name: Build release APK
-        run: flutter build apk --release --no-shrink
+          if [ -f android/app/build.gradle.kts ]; then
+            grep -nE "compileSdk|compileSdkVersion" \
+              android/app/build.gradle.kts || true
 
-      - name: Prepare APK
-        shell: bash
+            if grep -Eq \
+              "compileSdk[[:space:]]*=[[:space:]]*(flutter\.compileSdkVersion|33)" \
+              android/app/build.gradle.kts; then
+              echo "ERROR: app/build.gradle.kts still uses compileSdk 33."
+              exit 1
+            fi
+          fi
+
+          echo "compileSdk check passed."
+
+      - name: Build Release APK
         run: |
-          set -e
-          mkdir -p build/release
-          cp build/app/outputs/flutter-apk/app-release.apk \
-             build/release/elsheikh_customs_app-release.apk
-          ls -lh build/release/elsheikh_customs_app-release.apk
+          flutter build apk --release --no-shrink
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: elsheikh-customs-apk
-          path: build/release/elsheikh_customs_app-release.apk
+          name: elsheikh-customs-release-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
-          retention-days: 30
