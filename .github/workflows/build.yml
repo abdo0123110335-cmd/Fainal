@@ -24,17 +24,22 @@ jobs:
         with:
           channel: 'stable'
 
-      - name: Reconstruct Android Folder & Fix SDK Version
+      - name: Reconstruct Android Folder & Configure SDK
         run: |
           flutter create . --platforms=android --org com.elsheikhcustoms
           
-          # 1. تحديث إعدادات التطبيق الأساسي إلى 36
+          # فرض إصدار 36 عالمياً عبر ملف local.properties ليتطابق مع كافة الحزم تلقائياً
+          mkdir -p android
+          echo "flutter.compileSdkVersion=36" >> android/local.properties
+          echo "flutter.targetSdkVersion=36" >> android/local.properties
+          echo "flutter.minSdkVersion=21" >> android/local.properties
+
+          # تحديث إعدادات التطبيق الأساسي
           if [ -f android/app/build.gradle.kts ]; then
             GRADLE_FILE=android/app/build.gradle.kts
           else
             GRADLE_FILE=android/app/build.gradle
           fi
-          echo "Using Gradle file: $GRADLE_FILE"
           
           sed -i 's/minSdkVersion.*/minSdkVersion 21/g' "$GRADLE_FILE" || true
           sed -i 's/minSdk = .*/minSdk = 21/g' "$GRADLE_FILE" || true
@@ -42,47 +47,6 @@ jobs:
           sed -i 's/compileSdk = .*/compileSdk = 36/g' "$GRADLE_FILE" || true
           sed -i 's/targetSdkVersion.*/targetSdkVersion 36/g' "$GRADLE_FILE" || true
           sed -i 's/targetSdk = .*/targetSdk = 36/g' "$GRADLE_FILE" || true
-
-          # 2. إجبار كافة الإضافات (Plugins) على الإصدار 36 بطريقة صحيحة ومتوافقة مع KTS
-          python3 - << 'PYEOF'
-          import os
-
-          kts_code = """
-          allprojects {
-              afterEvaluate {
-                  extensions.findByName("android")?.let { android ->
-                      try {
-                          android.javaClass.getMethod("compileSdkVersion", Int::class.java).invoke(android, 36)
-                      } catch (e: Exception) {}
-                      try {
-                          android.javaClass.getMethod("setCompileSdk", Int::class.java).invoke(android, 36)
-                      } catch (e: Exception) {}
-                  }
-              }
-          }
-          """
-
-          root_kts = "android/build.gradle.kts"
-          root_groovy = "android/build.gradle"
-
-          if os.path.exists(root_kts):
-              with open(root_kts, "a", encoding="utf-8") as f:
-                  f.write("\n" + kts_code)
-          elif os.path.exists(root_groovy):
-              groovy_code = """
-              subprojects {
-                  afterEvaluate { project ->
-                      if (project.hasProperty('android')) {
-                          project.android {
-                              compileSdkVersion 36
-                          }
-                      }
-                  }
-              }
-              """
-              with open(root_groovy, "a", encoding="utf-8") as f:
-                  f.write("\n" + groovy_code)
-          PYEOF
 
       - name: Write Firebase configuration (google-services.json + firebase_options.dart)
         env:
@@ -204,10 +168,7 @@ jobs:
           PYEOF
 
       - name: Get Dependencies
-        run: |
-          flutter pub get
-          echo "flutter.compileSdkVersion=36" >> android/local.properties
-          echo "flutter.targetSdkVersion=36" >> android/local.properties
+        run: flutter pub get
 
       - name: Build APK
         run: flutter build apk --release --no-tree-shake-icons
