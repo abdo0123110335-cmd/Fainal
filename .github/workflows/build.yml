@@ -132,6 +132,14 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
+      - name: Remove Flutter template test
+        shell: bash
+        run: |
+          # flutter create can generate the default widget_test.dart.
+          # It references MyApp, while this project uses its own app root.
+          # It is not part of the production APK, so remove the template test.
+          rm -rf test
+
       - name: Analyze
         run: flutter analyze --no-fatal-infos
 
