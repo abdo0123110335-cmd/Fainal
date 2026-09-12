@@ -28,13 +28,13 @@ jobs:
         run: |
           flutter create . --platforms=android --org com.elsheikhcustoms
           
-          # فرض إصدار 36 عالمياً عبر ملف local.properties ليتطابق مع كافة الحزم تلقائياً
+          # فرض الإصدار 36 عبر ملف local.properties ليتم تعميمه تلقائياً على فلاتر والحزم
           mkdir -p android
-          echo "flutter.compileSdkVersion=36" >> android/local.properties
+          echo "flutter.compileSdkVersion=36" > android/local.properties
           echo "flutter.targetSdkVersion=36" >> android/local.properties
           echo "flutter.minSdkVersion=21" >> android/local.properties
 
-          # تحديث إعدادات التطبيق الأساسي
+          # تعديل ملف بناء التطبيق الأساسي لضمان استخدام الإصدار 36 و minSdk 21
           if [ -f android/app/build.gradle.kts ]; then
             GRADLE_FILE=android/app/build.gradle.kts
           else
@@ -47,6 +47,51 @@ jobs:
           sed -i 's/compileSdk = .*/compileSdk = 36/g' "$GRADLE_FILE" || true
           sed -i 's/targetSdkVersion.*/targetSdkVersion 36/g' "$GRADLE_FILE" || true
           sed -i 's/targetSdk = .*/targetSdk = 36/g' "$GRADLE_FILE" || true
+
+          # حقن كود لرفع إصدار الـ subprojects (مثل share_plus) إلى 36 لمنع خطأ AAR Metadata
+          python3 - << 'PYEOF'
+          import os
+
+          root_kts = "android/build.gradle.kts"
+          root_groovy = "android/build.gradle"
+
+          override_code_kts = """
+          subprojects {
+              afterEvaluate { project ->
+                  if (project.hasProperty("android")) {
+                      val androidExt = project.extensions.findByName("android")
+                      try {
+                          androidExt?.javaClass?.getMethod("compileSdkVersion", Int::class.java)?.invoke(androidExt, 36)
+                      } catch (e: Exception) {}
+                      try {
+                          androidExt?.javaClass?.getMethod("setCompileSdk", Int::class.java)?.invoke(androidExt, 36)
+                      } catch (e: Exception) {}
+                  }
+              }
+          }
+          """
+
+          if os.path.exists(root_kts):
+              with open(root_kts, "r", encoding="utf-8") as f:
+                  content = f.read()
+              if "subprojects" not in content:
+                  with open(root_kts, "a", encoding="utf-8") as f:
+                      f.write("\n" + override_code_kts)
+          elif os.path.exists(root_groovy):
+              override_code_groovy = """
+              subprojects {
+                  afterEvaluate { project ->
+                      if (project.hasProperty('android')) {
+                          project.android {
+                              compileSdkVersion 36
+                          }
+                      }
+                  }
+              }
+              """
+              with open(root_groovy, "a", encoding="utf-8") as f:
+                  f.write("\n" + override_code_groovy)
+          PYEOF
 
       - name: Write Firebase configuration (google-services.json + firebase_options.dart)
         env:
@@ -178,4 +223,3 @@ jobs:
         with:
           name: app-release-apk
           path: build/app/outputs/flutter-apk/app-release.apk
-
