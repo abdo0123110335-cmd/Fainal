@@ -26,23 +26,33 @@ jobs:
 
       - name: Configure Android SDK Version & Subprojects
         run: |
-          mkdir -p android
+          mkdir -p android/app
           echo "flutter.compileSdkVersion=36" > android/local.properties
           echo "flutter.targetSdkVersion=36" >> android/local.properties
           echo "flutter.minSdkVersion=21" >> android/local.properties
 
-          APP_GRADLE="android/app/build.gradle.kts"
-          if [ ! -f "$APP_GRADLE" ]; then
-            APP_GRADLE="android/app/build.gradle"
-          fi
-          
-          sed -i 's/minSdkVersion.*/minSdkVersion 21/g' "$APP_GRADLE" || true
-          sed -i 's/minSdk = .*/minSdk = 21/g' "$APP_GRADLE" || true
-          sed -i 's/compileSdkVersion.*/compileSdkVersion 36/g' "$APP_GRADLE" || true
-          sed -i 's/compileSdk = .*/compileSdk = 36/g' "$APP_GRADLE" || true
-          sed -i 's/targetSdkVersion.*/targetSdkVersion 36/g' "$APP_GRADLE" || true
-          sed -i 's/targetSdk = .*/targetSdk = 36/g' "$APP_GRADLE" || true
+          # تعديل ملف بناء التطبيق الرئيسي بأمان
+          python3 - << 'PYEOF'
+          import os, re
 
+          for path in ["android/app/build.gradle.kts", "android/app/build.gradle"]:
+              if os.path.exists(path):
+                  with open(path, "r", encoding="utf-8") as f:
+                      content = f.read()
+                  
+                  content = re.sub(r'minSdkVersion\s*=?\s*\d+', 'minSdkVersion 21', content)
+                  content = re.sub(r'minSdk\s*=\s*\d+', 'minSdk = 21', content)
+                  content = re.sub(r'compileSdkVersion\s*=?\s*[\w\d"-]+', 'compileSdkVersion 36', content)
+                  content = re.sub(r'compileSdk\s*=\s*\d+', 'compileSdk = 36', content)
+                  content = re.sub(r'targetSdkVersion\s*=?\s*\d+', 'targetSdkVersion 36', content)
+                  content = re.sub(r'targetSdk\s*=\s*\d+', 'targetSdk = 36', content)
+
+                  with open(path, "w", encoding="utf-8") as f:
+                      f.write(content)
+                  print(f"Updated {path}")
+          PYEOF
+
+          # حقن إعدادات Subprojects لضمان توافق share_plus
           GROOVY_BUILD="android/build.gradle"
           if [ ! -f "$GROOVY_BUILD" ]; then
             echo "allprojects { repositories { google() mavenCentral() } }" > "$GROOVY_BUILD"
@@ -71,75 +81,70 @@ jobs:
             exit 1
           fi
           
-          # إنشاء المجلد أولاً لتجنب خطأ No such file or directory
           mkdir -p android/app
           echo "$GOOGLE_SERVICES_JSON" > android/app/google-services.json
 
           python3 - << 'PYEOF'
           import os, re
 
+          # إعداد ملف الإعدادات العام
           if os.path.exists("android/settings.gradle.kts"):
               path = "android/settings.gradle.kts"
               content = open(path, encoding="utf-8").read()
               if "com.google.gms.google-services" not in content:
-                  content = re.sub(
-                      r"(plugins\s*\{\n)",
-                      r'\1    id("com.google.gms.google-services") version "4.4.2" apply false\n',
-                      content,
-                      count=1,
-                  )
+                  content = re.sub(r"(plugins\s*\{\n)", r'\1    id("com.google.gms.google-services") version "4.4.2" apply false\n', content, count=1)
                   open(path, "w", encoding="utf-8").write(content)
           elif os.path.exists("android/build.gradle"):
               path = "android/build.gradle"
               content = open(path, encoding="utf-8").read()
               if "com.google.gms:google-services" not in content:
-                  content = re.sub(
-                      r"(dependencies\s*\{)",
-                      r"\1\n        classpath 'com.google.gms:google-services:4.4.2'",
-                      content,
-                      count=1,
-                  )
+                  content = re.sub(r"(dependencies\s*\{)", r"\1\n        classpath 'com.google.gms:google-services:4.4.2'", content, count=1)
                   open(path, "w", encoding="utf-8").write(content)
 
-          app_path = "android/app/build.gradle.kts" if os.path.exists("android/app/build.gradle.kts") else "android/app/build.gradle"
-          content = open(app_path, encoding="utf-8").read()
-          is_kts = app_path.endswith(".kts")
-          plugin_line = '    id("com.google.gms.google-services")\n' if is_kts else "    id 'com.google.gms.google-services'\n"
-          if "google-services" not in content:
-              content = re.sub(r"(plugins\s*\{\n)", r"\1" + plugin_line, content, count=1)
-              open(app_path, "w", encoding="utf-8").write(content)
+          # ربط خدمة Google Services بملف التطبيق
+          for app_path in ["android/app/build.gradle.kts", "android/app/build.gradle"]:
+              if os.path.exists(app_path):
+                  content = open(app_path, encoding="utf-8").read()
+                  is_kts = app_path.endswith(".kts")
+                  plugin_line = '    id("com.google.gms.google-services")\n' if is_kts else "    id 'com.google.gms.google-services'\n"
+                  if "google-services" not in content:
+                      content = re.sub(r"(plugins\s*\{\n)", r"\1" + plugin_line, content, count=1)
+                      open(app_path, "w", encoding="utf-8").write(content)
+                  break
           PYEOF
 
           python3 - << 'PYEOF'
-          import json
-          with open("android/app/google-services.json", encoding="utf-8") as f:
-              data = json.load(f)
-          project_info = data["project_info"]
-          client = data["client"][0]
-          app_id = client["client_info"]["mobilesdk_app_id"]
-          api_key = client["api_key"][0]["current_key"]
-          project_id = project_info["project_id"]
-          sender_id = project_info["project_number"]
-          storage_bucket = project_info.get("storage_bucket", f"{project_id}.appspot.com")
+          import json, os
+          if os.path.exists("android/app/google-services.json"):
+              with open("android/app/google-services.json", encoding="utf-8") as f:
+                  data = json.load(f)
+              project_info = data["project_info"]
+              client = data["client"][0]
+              app_id = client["client_info"]["mobilesdk_app_id"]
+              api_key = client["api_key"][0]["current_key"]
+              project_id = project_info["project_id"]
+              sender_id = project_info["project_number"]
+              storage_bucket = project_info.get("storage_bucket", f"{project_id}.appspot.com")
 
-          content = f'''import 'package:firebase_core/firebase_core.dart' show FirebaseOptions;
-          import 'package:flutter/foundation.dart' show kIsWeb, defaultTargetPlatform, TargetPlatform;
-          class DefaultFirebaseOptions {{
-            static FirebaseOptions get currentPlatform {{
-              if (kIsWeb) {{ throw UnsupportedError('Web not supported'); }}
-              switch (defaultTargetPlatform) {{
-                case TargetPlatform.android: return android;
-                default: throw UnsupportedError('Platform not supported');
+              content = f'''import 'package:firebase_core/firebase_core.dart' show FirebaseOptions;
+              import 'package:flutter/foundation.dart' show kIsWeb, defaultTargetPlatform, TargetPlatform;
+              class DefaultFirebaseOptions {{
+                static FirebaseOptions get currentPlatform {{
+                  if (kIsWeb) {{ throw UnsupportedError('Web not supported'); }}
+                  switch (defaultTargetPlatform) {{
+                    case TargetPlatform.android: return android;
+                    default: throw UnsupportedError('Platform not supported');
+                  }}
+                }}
+                static const FirebaseOptions android = FirebaseOptions(
+                  apiKey: '{api_key}', appId: '{app_id}', messagingSenderId: '{sender_id}',
+                  projectId: '{project_id}', storageBucket: '{storage_bucket}',
+                );
               }}
-            }}
-            static const FirebaseOptions android = FirebaseOptions(
-              apiKey: '{api_key}', appId: '{app_id}', messagingSenderId: '{sender_id}',
-              projectId: '{project_id}', storageBucket: '{storage_bucket}',
-            );
-          }}
-          '''
-          with open("lib/firebase_options.dart", "w", encoding="utf-8") as f:
-              f.write(content)
+              '''
+              os.makedirs("lib", exist_ok=True)
+              with open("lib/firebase_options.dart", "w", encoding="utf-8") as f:
+                  f.write(content)
           PYEOF
 
       - name: Add camera & storage permissions to AndroidManifest
@@ -167,23 +172,23 @@ jobs:
         run: |
           python3 - << 'PYEOF'
           import os, re
-          path = "android/app/build.gradle.kts" if os.path.exists("android/app/build.gradle.kts") else "android/app/build.gradle"
-          if os.path.exists(path):
-              is_kts = path.endswith(".kts")
-              with open(path, "r", encoding="utf-8") as f: content = f.read()
-              if is_kts:
-                  content = re.sub(r"isMinifyEnabled\s*=\s*true", "isMinifyEnabled = false", content)
-                  content = re.sub(r"isShrinkResources\s*=\s*true", "isShrinkResources = false", content)
-                  if "isMinifyEnabled" not in content:
-                      match = re.search(r"release\s*\{", content)
-                      if match: content = content[:match.end()] + "\n            isMinifyEnabled = false\n            isShrinkResources = false" + content[match.end():]
-              else:
-                  content = re.sub(r"minifyEnabled\s+true", "minifyEnabled false", content)
-                  content = re.sub(r"shrinkResources\s+true", "shrinkResources false", content)
-                  if "minifyEnabled" not in content:
-                      match = re.search(r"release\s*\{", content)
-                      if match: content = content[:match.end()] + "\n            minifyEnabled false\n            shrinkResources false" + content[match.end():]
-              with open(path, "w", encoding="utf-8") as f: f.write(content)
+          for path in ["android/app/build.gradle.kts", "android/app/build.gradle"]:
+              if os.path.exists(path):
+                  is_kts = path.endswith(".kts")
+                  with open(path, "r", encoding="utf-8") as f: content = f.read()
+                  if is_kts:
+                      content = re.sub(r"isMinifyEnabled\s*=\s*true", "isMinifyEnabled = false", content)
+                      content = re.sub(r"isShrinkResources\s*=\s*true", "isShrinkResources = false", content)
+                      if "isMinifyEnabled" not in content:
+                          match = re.search(r"release\s*\{", content)
+                          if match: content = content[:match.end()] + "\n            isMinifyEnabled = false\n            isShrinkResources = false" + content[match.end():]
+                  else:
+                      content = re.sub(r"minifyEnabled\s+true", "minifyEnabled false", content)
+                      content = re.sub(r"shrinkResources\s+true", "shrinkResources false", content)
+                      if "minifyEnabled" not in content:
+                          match = re.search(r"release\s*\{", content)
+                          if match: content = content[:match.end()] + "\n            minifyEnabled false\n            shrinkResources false" + content[match.end():]
+                  with open(path, "w", encoding="utf-8") as f: f.write(content)
           PYEOF
 
       - name: Get Dependencies
@@ -207,4 +212,3 @@ jobs:
         with:
           name: app-release-apk
           path: build/app/outputs/flutter-apk/app-release.apk
-
