@@ -2,254 +2,154 @@ name: Build Android APK
 
 on:
   push:
-    branches: [ main, master ]
+    branches:
+      - main
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'zulu'
-          java-version: '17'
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          channel: 'stable'
+          channel: stable
+          cache: true
 
-      - name: Regenerate Android Project & Safely Update SDK Config
+      - name: Prepare Android project
+        shell: bash
         run: |
-          flutter create . --platforms=android --org com.elsheikhcustoms
+          set -e
+          flutter --version
 
-          mkdir -p android/app
-          echo "flutter.compileSdkVersion=36" > android/local.properties
-          echo "flutter.targetSdkVersion=36" >> android/local.properties
-          echo "flutter.minSdkVersion=21" >> android/local.properties
+          # The uploaded project contains the Flutter/Dart source but may not
+          # contain the generated Android folder. Create it if necessary.
+          if [ ! -d "android" ]; then
+            flutter create \
+              --platforms=android \
+              --org com.elsheikhcustoms \
+              --project-name elsheikh_customs_app \
+              .
+          fi
 
-          # تعديل ملف build.gradle.kts بطريقة آمنة سطر بسطر بدون تداخل أقواس
-          python3 - << 'PYEOF'
-          import os, re
-
-          path = "android/app/build.gradle.kts"
-          if os.path.exists(path):
-              with open(path, "r", encoding="utf-8") as f:
-                  content = f.read()
-
-              # تحديث أو حقن compileSdk
-              if re.search(r'compileSdk\s*=', content):
-                  content = re.sub(r'compileSdk\s*=\s*.*', 'compileSdk = 36', content)
-              elif re.search(r'compileSdkVersion', content):
-                  content = re.sub(r'compileSdkVersion.*', 'compileSdkVersion = 36', content)
-              else:
-                  content = content.replace("android {", "android {\n    compileSdk = 36")
-
-              # تحديث minSdk
-              if re.search(r'minSdk\s*=', content):
-                  content = re.sub(r'minSdk\s*=\s*.*', 'minSdk = 21', content)
-              elif re.search(r'minSdkVersion', content):
-                  content = re.sub(r'minSdkVersion.*', 'minSdkVersion = 21', content)
-
-              # تحديث targetSdk
-              if re.search(r'targetSdk\s*=', content):
-                  content = re.sub(r'targetSdk\s*=\s*.*', 'targetSdk = 36', content)
-              elif re.search(r'targetSdkVersion', content):
-                  content = re.sub(r'targetSdkVersion.*', 'targetSdkVersion = 36', content)
-
-              with open(path, "w", encoding="utf-8") as f:
-                  f.write(content)
-              print("Successfully updated build.gradle.kts safely.")
-          PYEOF
-
-          # إصلاح ملف AndroidManifest.xml وإزالة الـ v1 embedding
-          python3 - << 'PYEOF'
-          import os, re
-
-          manifest_path = "android/app/src/main/AndroidManifest.xml"
-          if os.path.exists(manifest_path):
-              with open(manifest_path, "r", encoding="utf-8") as f:
-                  content = f.read()
-
-              content = re.sub(r'android:name="io\.flutter\.app\.FlutterApplication"', '', content)
-              
-              if "flutterEmbedding" not in content:
-                  content = content.replace("<application", '<application\n        android:name="${applicationName}"')
-                  content = re.sub(r'(</application>)', r'    <meta-data\n        android:name="flutterEmbedding"\n        android:value="2" />\n\1', content)
-
-              with open(manifest_path, "w", encoding="utf-8") as f:
-                  f.write(content)
-          PYEOF
-
-          # ضبط إعدادات الـ Subprojects لـ share_plus
-          cat << 'EOF' > android/build.gradle
-          allprojects {
-              repositories {
-                  google()
-                  mavenCentral()
-              }
-          }
-
-          rootProject.buildDir = '../build'
-          subprojects {
-              project.buildDir = "${rootProject.buildDir}/${project.name}"
-          }
-          subprojects {
-              project.evaluationDependsOn(':app')
-          }
-
-          tasks.register("clean", Delete) {
-              delete rootProject.buildDir
-          }
-
-          subprojects {
-              afterEvaluate { project ->
-                  if (project.hasProperty('android')) {
-                      project.android {
-                          if (compileSdkVersion == null || compileSdkVersion.toString() < '34' || compileSdkVersion.toString() == 'android-33') {
-                              compileSdkVersion 36
-                          }
-                      }
-                  }
-              }
-          }
-          EOF
-
-      - name: Write Firebase configuration (google-services.json + firebase_options.dart)
+      - name: Configure Firebase from GitHub Secret
         env:
           GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        shell: bash
         run: |
+          set -e
+
           if [ -z "$GOOGLE_SERVICES_JSON" ]; then
-            echo "::error::سر GOOGLE_SERVICES_JSON غير موجود في مستودع GitHub."
+            echo "ERROR: GitHub Actions secret GOOGLE_SERVICES_JSON is missing."
+            echo "Add the complete google-services.json content as:"
+            echo "Settings -> Secrets and variables -> Actions -> New repository secret"
             exit 1
           fi
-          
+
           mkdir -p android/app
-          echo "$GOOGLE_SERVICES_JSON" > android/app/google-services.json
+          printf '%s' "$GOOGLE_SERVICES_JSON" > android/app/google-services.json
 
-          python3 - << 'PYEOF'
-          import os, re
+          # Generate lib/firebase_options.dart from google-services.json.
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
 
-          if os.path.exists("android/settings.gradle.kts"):
-              path = "android/settings.gradle.kts"
-              content = open(path, encoding="utf-8").read()
-              if "com.google.gms.google-services" not in content:
-                  content = re.sub(r"(plugins\s*\{\n)", r'\1    id("com.google.gms.google-services") version "4.4.2" apply false\n', content, count=1)
-                  open(path, "w", encoding="utf-8").write(content)
+          src = Path("android/app/google-services.json")
+          data = json.loads(src.read_text(encoding="utf-8"))
 
-          for app_path in ["android/app/build.gradle.kts", "android/app/build.gradle"]:
-              if os.path.exists(app_path):
-                  content = open(app_path, encoding="utf-8").read()
-                  is_kts = app_path.endswith(".kts")
-                  plugin_line = '    id("com.google.gms.google-services")\n' if is_kts else "    id 'com.google.gms.google-services'\n"
-                  if "google-services" not in content:
-                      content = re.sub(r"(plugins\s*\{\n)", r"\1" + plugin_line, content, count=1)
-                      open(app_path, "w", encoding="utf-8").write(content)
-                  break
-          PYEOF
+          project = data["project_info"]
+          client = data["client"][0]
+          app = client["client_info"]
+          android_info = app["android_client_info"]
 
-          python3 - << 'PYEOF'
-          import json, os
-          if os.path.exists("android/app/google-services.json"):
-              with open("android/app/google-services.json", encoding="utf-8") as f:
-                  data = json.load(f)
-              project_info = data["project_info"]
-              client = data["client"][0]
-              app_id = client["client_info"]["mobilesdk_app_id"]
-              api_key = client["api_key"][0]["current_key"]
-              project_id = project_info["project_id"]
-              sender_id = project_info["project_number"]
-              storage_bucket = project_info.get("storage_bucket", f"{project_id}.appspot.com")
+          package_name = android_info["package_name"]
+          if package_name != "com.elsheikhcustoms.elsheikh_customs_app":
+              raise SystemExit(
+                  f"Firebase Android package mismatch: {package_name}\n"
+                  "Expected: com.elsheikhcustoms.elsheikh_customs_app"
+              )
 
-              content = f'''import 'package:firebase_core/firebase_core.dart' show FirebaseOptions;
-              import 'package:flutter/foundation.dart' show kIsWeb, defaultTargetPlatform, TargetPlatform;
-              class DefaultFirebaseOptions {{
-                static FirebaseOptions get currentPlatform {{
-                  if (kIsWeb) {{ throw UnsupportedError('Web not supported'); }}
-                  switch (defaultTargetPlatform) {{
-                    case TargetPlatform.android: return android;
-                    default: throw UnsupportedError('Platform not supported');
-                  }}
-                }}
-                static const FirebaseOptions android = FirebaseOptions(
-                  apiKey: '{api_key}', appId: '{app_id}', messagingSenderId: '{sender_id}',
-                  projectId: '{project_id}', storageBucket: '{storage_bucket}',
-                );
-              }}
-              '''
-              os.makedirs("lib", exist_ok=True)
-              with open("lib/firebase_options.dart", "w", encoding="utf-8") as f:
-                  f.write(content)
-          PYEOF
+          api_key = client["api_key"][0]["current_key"]
+          project_id = project["project_id"]
+          sender_id = project["project_number"]
+          app_id = app["mobilesdk_app_id"]
+          storage_bucket = project.get("storage_bucket") or f"{project_id}.appspot.com"
 
-      - name: Add camera & storage permissions to AndroidManifest
+          dart = f"""import 'package:firebase_core/firebase_core.dart' show FirebaseOptions; import 'package:flutter/foundation.dart' show defaultTargetPlatform, kIsWeb, TargetPlatform; class DefaultFirebaseOptions {{ static FirebaseOptions get currentPlatform {{ if (kIsWeb) {{ throw UnsupportedError( 'This app is configured for Android only.', ); }} switch (defaultTargetPlatform) {{ case TargetPlatform.android: return android; default: throw UnsupportedError( 'This app is configured for Android only.', ); }} }} static const FirebaseOptions android = FirebaseOptions( apiKey: {api_key!r}, appId: {app_id!r}, messagingSenderId: {sender_id!r}, projectId: {project_id!r}, storageBucket: {storage_bucket!r}, ); }} """
+          # Fix Python repr quoting for Dart single-quoted strings.
+          for value in [api_key, app_id, sender_id, project_id, storage_bucket]:
+              if "'" in value:
+                  raise SystemExit("Firebase value contains an unsupported single quote.")
+
+          dart = dart.replace(f"'{api_key!r}'", f"'{api_key}'")
+          dart = dart.replace(f"'{app_id!r}'", f"'{app_id}'")
+          dart = dart.replace(f"'{sender_id!r}'", f"'{sender_id}'")
+          dart = dart.replace(f"'{project_id!r}'", f"'{project_id}'")
+          dart = dart.replace(f"'{storage_bucket!r}'", f"'{storage_bucket}'")
+
+          Path("lib/firebase_options.dart").write_text(dart, encoding="utf-8")
+          print(f"Firebase configured for project: {project_id}")
+          print(f"Android package: {package_name}")
+          PY
+
+      - name: Configure Google Services Gradle plugin
+        shell: bash
         run: |
-          MANIFEST=android/app/src/main/AndroidManifest.xml
-          if [ -f "$MANIFEST" ] && ! grep -q "android.permission.CAMERA" "$MANIFEST"; then
-            sed -i '/<manifest xmlns:android/a\    <uses-permission android:name="android.permission.CAMERA" />\n    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />\n    <uses-permission android:name="android.permission.INTERNET" />\n    <uses-feature android:name="android.hardware.camera" android:required="false" />\n    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />' "$MANIFEST"
-          fi
+          set -e
 
-      - name: Add ProGuard rules for ML Kit text recognition
-        run: |
-          mkdir -p android/app
-          PROGUARD=android/app/proguard-rules.pro
-          touch "$PROGUARD"
-          cat >> "$PROGUARD" << 'EOF'
-          -dontwarn com.google.mlkit.vision.text.chinese.**
-          -dontwarn com.google.mlkit.vision.text.devanagari.**
-          -dontwarn com.google.mlkit.vision.text.japanese.**
-          -dontwarn com.google.mlkit.vision.text.korean.**
-          -keep class com.google.mlkit.vision.text.** { *; }
-          -keep class com.google.mlkit.vision.text.latin.** { *; }
-          EOF
-
-      - name: Disable R8 code shrinking for a stable release build
-        run: |
-          python3 - << 'PYEOF'
-          import os, re
-          for path in ["android/app/build.gradle.kts", "android/app/build.gradle"]:
-              if os.path.exists(path):
-                  is_kts = path.endswith(".kts")
-                  with open(path, "r", encoding="utf-8") as f: content = f.read()
-                  if is_kts:
-                      content = re.sub(r"isMinifyEnabled\s*=\s*true", "isMinifyEnabled = false", content)
-                      content = re.sub(r"isShrinkResources\s*=\s*true", "isShrinkResources = false", content)
-                      if "isMinifyEnabled" not in content:
-                          match = re.search(r"release\s*\{", content)
-                          if match: content = content[:match.end()] + "\n            isMinifyEnabled = false\n            isShrinkResources = false" + content[match.end():]
-                  else:
-                      content = re.sub(r"minifyEnabled\s+true", "minifyEnabled false", content)
-                      content = re.sub(r"shrinkResources\s+true", "shrinkResources false", content)
-                      if "minifyEnabled" not in content:
-                          match = re.search(r"release\s*\{", content)
-                          if match: content = content[:match.end()] + "\n            minifyEnabled false\n            shrinkResources false" + content[match.end():]
-                  with open(path, "w", encoding="utf-8") as f: content = f.write(content)
-          PYEOF
-
-      - name: Get Dependencies
-        run: flutter pub get
-
-      - name: Build APK
-        run: flutter build apk --release --no-tree-shake-icons
-
-      - name: Find and Move APK if needed
-        run: |
-          mkdir -p build/app/outputs/flutter-apk/
-          if [ ! -f "build/app/outputs/flutter-apk/app-release.apk" ]; then
-            FOUND_APK=$(find . -path "*/build/app/outputs/apk/release/*.apk" -o -name "app-release.apk" | head -n 1)
-            if [ -n "$FOUND_APK" ]; then
-              cp "$FOUND_APK" build/app/outputs/flutter-apk/app-release.apk
+          # Add the Google Services plugin to the Android buildscript when
+          # using the traditional Flutter Groovy Gradle template.
+          if [ -f "android/build.gradle" ]; then
+            if ! grep -q "com.google.gms:google-services" android/build.gradle; then
+              python3 - <<'PY'
+          from pathlib import Path
+          p = Path("android/build.gradle")
+          s = p.read_text()
+          line = " classpath 'com.google.gms:google-services:4.4.2'\n"
+          if "dependencies {" in s:
+              s = s.replace("dependencies {", "dependencies {\n" + line, 1)
+          else:
+              raise SystemExit("android/build.gradle does not contain a dependencies block")
+          p.write_text(s)
+          PY
             fi
           fi
 
-      - name: Upload APK Artifact
+          # Apply the plugin in app-level Gradle.
+          if [ -f "android/app/build.gradle" ]; then
+            if ! grep -q "com.google.gms.google-services" android/app/build.gradle; then
+              printf '\napply plugin: "com.google.gms.google-services"\n' >> android/app/build.gradle
+            fi
+          fi
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze --no-fatal-infos
+
+      - name: Build release APK
+        run: flutter build apk --release
+
+      - name: Rename APK
+        shell: bash
+        run: |
+          set -e
+          mkdir -p build/release
+          cp build/app/outputs/flutter-apk/app-release.apk \
+             build/release/elsheikh_customs_app-release.apk
+
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-release-apk
-          path: build/app/outputs/flutter-apk/app-release.apk
-
+          name: elsheikh-customs-apk
+          path: build/release/elsheikh_customs_app-release.apk
+          if-no-files-found: error
+          retention-days: 30
