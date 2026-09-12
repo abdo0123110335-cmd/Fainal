@@ -38,11 +38,11 @@ jobs:
           sed -i 's/minSdkVersion.*/minSdkVersion 21/g' "$GRADLE_FILE" || true
           sed -i 's/minSdk = .*/minSdk = 21/g' "$GRADLE_FILE" || true
           
-          # إجبار النظام على استخدام الإصدار 34 لحل مشكلة share_plus
-          sed -i 's/compileSdkVersion.*/compileSdkVersion 34/g' "$GRADLE_FILE" || true
-          sed -i 's/compileSdk = .*/compileSdk = 34/g' "$GRADLE_FILE" || true
-          sed -i 's/targetSdkVersion.*/targetSdkVersion 34/g' "$GRADLE_FILE" || true
-          sed -i 's/targetSdk = .*/targetSdk = 34/g' "$GRADLE_FILE" || true
+          # إجبار النظام على استخدام الإصدار 36 لتوافق مكتبات (image_picker و ml_kit)
+          sed -i 's/compileSdkVersion.*/compileSdkVersion 36/g' "$GRADLE_FILE" || true
+          sed -i 's/compileSdk = .*/compileSdk = 36/g' "$GRADLE_FILE" || true
+          sed -i 's/targetSdkVersion.*/targetSdkVersion 36/g' "$GRADLE_FILE" || true
+          sed -i 's/targetSdk = .*/targetSdk = 36/g' "$GRADLE_FILE" || true
 
       - name: Write Firebase configuration (google-services.json + firebase_options.dart)
         env:
@@ -158,9 +158,6 @@ jobs:
           cat >> "$PROGUARD" << 'EOF'
 
           # نستخدم فقط قارئ النصوص اللاتينية (Latin) من ML Kit Text Recognition.
-          # المكتبة نفسها تشير إلى مكتبات اللغات الأخرى (صيني/ياباني/كوري/ديفاناغاري)
-          # كخيارات اختيارية غير مضمّنة في المشروع، فيفشل R8 أثناء بناء نسخة الـ
-          # release ما لم نتجاهل التحذيرات الخاصة بها صراحة هنا.
           -dontwarn com.google.mlkit.vision.text.chinese.**
           -dontwarn com.google.mlkit.vision.text.devanagari.**
           -dontwarn com.google.mlkit.vision.text.japanese.**
