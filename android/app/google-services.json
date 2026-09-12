@@ -7,9 +7,9 @@
   "client": [
     {
       "client_info": {
-        "mobilesdk_app_id": "1:980812225441:android:7c5f75f28da0f8b54e89e0",
+        "mobilesdk_app_id": "1:980812225441:android:2008f5037d1ca59c4e89e0",
         "android_client_info": {
-          "package_name": "com.example.apk_main"
+          "package_name": "com.elsheikhcustoms.elsheikh_customs_app"
         }
       },
       "oauth_client": [],
