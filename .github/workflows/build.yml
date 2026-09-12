@@ -2,8 +2,7 @@ name: Build Android APK
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -23,25 +22,95 @@ jobs:
           channel: stable
           cache: true
 
+      - name: Install Android SDK 36
+        uses: android-actions/setup-android@v3
+
       - name: Generate Android project
         shell: bash
         run: |
-          set -e
+          set -euxo pipefail
           flutter --version
 
-          if [ ! -d "android" ]; then
+          if [ ! -d android ]; then
             flutter create --platforms=android --project-name elsheikh_customs_app .
           fi
 
-      - name: Configure Firebase and Android
+      - name: Configure Android build
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          # Force every Android app Gradle configuration to compile with API 36.
+          # The previous workflow only matched one old Gradle syntax, while the
+          # current Flutter template may use Gradle Kotlin DSL.
+          if [ -f android/app/build.gradle ]; then
+            python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path("android/app/build.gradle")
+          s = p.read_text()
+
+          s = re.sub(r'compileSdk(?:Version)?\s+(?:flutter\.compileSdkVersion|\d+)',
+                     'compileSdk 36', s)
+
+          if 'compileSdk 36' not in s:
+              s = s.replace('android {', 'android {\n compileSdk 36', 1)
+
+          # Release must not run R8 for this project because
+          # google_mlkit_text_recognition 0.15.1 references optional language
+          # recognizer classes that are not packaged by the plugin.
+          s = re.sub(r'isMinifyEnabled\s+true', 'isMinifyEnabled false', s)
+          s = re.sub(r'isShrinkResources\s+true', 'isShrinkResources false', s)
+
+          if 'isMinifyEnabled' not in s:
+              s = s.replace('buildTypes {', 'buildTypes {\n release {\n minifyEnabled false\n shrinkResources false\n }', 1)
+
+          p.write_text(s)
+          PY
+          elif [ -f android/app/build.gradle.kts ]; then
+            python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path("android/app/build.gradle.kts")
+          s = p.read_text()
+
+          s = re.sub(r'compileSdk\s*=\s*(?:flutter\.compileSdkVersion|\d+)',
+                     'compileSdk = 36', s)
+
+          if 'compileSdk = 36' not in s:
+              s = s.replace('android {', 'android {\n compileSdk = 36', 1)
+
+          s = re.sub(r'isMinifyEnabled\s*=\s*true', 'isMinifyEnabled = false', s)
+          s = re.sub(r'isShrinkResources\s*=\s*true', 'isShrinkResources = false', s)
+
+          if 'isMinifyEnabled = false' not in s:
+              s = s.replace(
+                  'buildTypes {',
+                  'buildTypes {\n release {\n isMinifyEnabled = false\n isShrinkResources = false\n }',
+                  1
+              )
+
+          p.write_text(s)
+          PY
+          else
+            echo "ERROR: No Android app Gradle file found"
+            exit 1
+          fi
+
+          echo "=== Android app Gradle after patch ==="
+          cat android/app/build.gradle 2>/dev/null || cat android/app/build.gradle.kts
+
+      - name: Configure Firebase
         env:
           GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
         shell: bash
         run: |
-          set -e
+          set -euxo pipefail
 
-          if [ -z "$GOOGLE_SERVICES_JSON" ]; then
-            echo "ERROR: Missing GitHub Secret GOOGLE_SERVICES_JSON"
+          if [ -z "${GOOGLE_SERVICES_JSON:-}" ]; then
+            echo "ERROR: Missing GitHub Actions secret GOOGLE_SERVICES_JSON"
             exit 1
           fi
 
@@ -50,98 +119,81 @@ jobs:
 
           python3 - <<'PY'
           import json
-          import re
           from pathlib import Path
 
           data = json.loads(Path("android/app/google-services.json").read_text())
           project = data["project_info"]
           client = data["client"][0]
-          ci = client["client_info"]
-          android = ci["android_client_info"]
+          info = client["client_info"]
+          android_info = info["android_client_info"]
 
-          package_name = android["package_name"]
+          package_name = android_info["package_name"]
           api_key = client["api_key"][0]["current_key"]
           project_id = project["project_id"]
           sender_id = project["project_number"]
-          app_id = ci["mobilesdk_app_id"]
+          app_id = info["mobilesdk_app_id"]
           storage_bucket = project.get("storage_bucket") or f"{project_id}.appspot.com"
 
-          print("Firebase project:", project_id)
-          print("Android package:", package_name)
+          if package_name != "com.elsheikhcustoms.elsheikh_customs_app":
+              raise SystemExit(
+                  f"Firebase package is {package_name}, expected "
+                  "com.elsheikhcustoms.elsheikh_customs_app"
+              )
 
-          # Configure the package/namespace in either Gradle format.
-          groovy = Path("android/app/build.gradle")
-          kotlin = Path("android/app/build.gradle.kts")
-
-          if groovy.exists():
-              p = groovy
-              s = p.read_text()
-              s = re.sub(r'namespace\\s+[\'"][^\'"]+[\'"]',
-                         f'namespace "{package_name}"', s, count=1)
-              s = re.sub(r'applicationId\\s+[\'"][^\'"]+[\'"]',
-                         f'applicationId "{package_name}"', s, count=1)
-              # Flutter generated projects normally use flutter.compileSdkVersion.
-              s = re.sub(r'compileSdk\\s+flutter\\.compileSdkVersion',
-                         'compileSdk 36', s, count=1)
-              s = re.sub(r'compileSdkVersion\\s+flutter\\.compileSdkVersion',
-                         'compileSdkVersion 36', s, count=1)
-              p.write_text(s)
-          elif kotlin.exists():
-              p = kotlin
-              s = p.read_text()
-              s = re.sub(r'namespace\\s*=\\s*"[^"]+"',
-                         f'namespace = "{package_name}"', s, count=1)
-              s = re.sub(r'applicationId\\s*=\\s*"[^"]+"',
-                         f'applicationId = "{package_name}"', s, count=1)
-              s = re.sub(r'compileSdk\\s*=\\s*flutter\\.compileSdkVersion',
-                         'compileSdk = 36', s, count=1)
-              p.write_text(s)
-          else:
-              raise SystemExit("Android app Gradle file was not found")
-
-          # Update AndroidManifest package only if an old package declaration exists.
-          manifest = Path("android/app/src/main/AndroidManifest.xml")
-          if manifest.exists():
-              s = manifest.read_text()
-              s = re.sub(r'package="[^"]+"', f'package="{package_name}"', s, count=1)
-              manifest.write_text(s)
-
-          # Firebase Flutter options are supplied directly to firebase_core,
-          # so the Google Services Gradle plugin is not required here.
-          def dart_string(v):
+          def q(v):
               return "'" + str(v).replace("\\", "\\\\").replace("'", "\\'") + "'"
 
-          dart = f"""import 'package:firebase_core/firebase_core.dart' show FirebaseOptions; import 'package:flutter/foundation.dart' show defaultTargetPlatform, kIsWeb, TargetPlatform; class DefaultFirebaseOptions {{ static FirebaseOptions get currentPlatform {{ if (kIsWeb) {{ throw UnsupportedError('This app is configured for Android only.'); }} switch (defaultTargetPlatform) {{ case TargetPlatform.android: return android; default: throw UnsupportedError('This app is configured for Android only.'); }} }} static const FirebaseOptions android = FirebaseOptions( apiKey: {dart_string(api_key)}, appId: {dart_string(app_id)}, messagingSenderId: {dart_string(sender_id)}, projectId: {dart_string(project_id)}, storageBucket: {dart_string(storage_bucket)}, ); }} """
+          dart = f"""import 'package:firebase_core/firebase_core.dart' show FirebaseOptions; import 'package:flutter/foundation.dart' show defaultTargetPlatform, kIsWeb, TargetPlatform; class DefaultFirebaseOptions {{ static FirebaseOptions get currentPlatform {{ if (kIsWeb) {{ throw UnsupportedError('This app is configured for Android only.'); }} switch (defaultTargetPlatform) {{ case TargetPlatform.android: return android; default: throw UnsupportedError('This app is configured for Android only.'); }} }} static const FirebaseOptions android = FirebaseOptions( apiKey: {q(api_key)}, appId: {q(app_id)}, messagingSenderId: {q(sender_id)}, projectId: {q(project_id)}, storageBucket: {q(storage_bucket)}, ); }} """
+
           Path("lib/firebase_options.dart").write_text(dart, encoding="utf-8")
+          print("Firebase configured:", project_id)
           PY
 
-      - name: Install dependencies
+      - name: Install Flutter dependencies
         run: flutter pub get
 
-      - name: Analyze Dart code
+      - name: Analyze
         shell: bash
         run: |
           set -e
-          # The repository does not contain a real widget test; avoid the
-          # template test generated by `flutter create`.
           rm -f test/widget_test.dart
           flutter analyze --no-fatal-infos
 
-      - name: Build release APK
+      - name: Clean
+        run: flutter clean
+
+      - name: Get dependencies again
+        run: flutter pub get
+
+      - name: Verify release minification is disabled
         shell: bash
         run: |
           set -e
-          # --no-shrink avoids R8 removing/looking for optional ML Kit
-          # language classes that are not used by this application.
-          flutter build apk --release --no-shrink
+          if [ -f android/app/build.gradle ]; then
+            grep -nE 'compileSdk|minifyEnabled|shrinkResources' android/app/build.gradle || true
+            if grep -q 'minifyEnabled true' android/app/build.gradle; then
+              echo "ERROR: R8/minification is still enabled"
+              exit 1
+            fi
+          else
+            grep -nE 'compileSdk|isMinifyEnabled|isShrinkResources' android/app/build.gradle.kts || true
+            if grep -q 'isMinifyEnabled = true' android/app/build.gradle.kts; then
+              echo "ERROR: R8/minification is still enabled"
+              exit 1
+            fi
+          fi
 
-      - name: Rename APK
+      - name: Build release APK
+        run: flutter build apk --release --no-shrink
+
+      - name: Prepare APK
         shell: bash
         run: |
           set -e
           mkdir -p build/release
           cp build/app/outputs/flutter-apk/app-release.apk \
              build/release/elsheikh_customs_app-release.apk
+          ls -lh build/release/elsheikh_customs_app-release.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
