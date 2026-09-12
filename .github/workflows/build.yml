@@ -24,17 +24,14 @@ jobs:
         with:
           channel: 'stable'
 
-      - name: Regenerate Modern Android v2 Project & Configure SDK
+      - name: Configure Android SDK Version & Subprojects
         run: |
-          # إنشاء مجلد أندرويد حديث كلياً يتوافق مع v2 embedding ويمنع المشكلة نهائياً
-          flutter create . --platforms=android --org com.elsheikhcustoms
-
-          mkdir -p android
+          mkdir -p android/app
           echo "flutter.compileSdkVersion=36" > android/local.properties
           echo "flutter.targetSdkVersion=36" >> android/local.properties
           echo "flutter.minSdkVersion=21" >> android/local.properties
 
-          # تحديث ملف بناء التطبيق الرئيسي
+          # تعديل ملف بناء التطبيق الرئيسي بأمان
           python3 - << 'PYEOF'
           import os, re
 
@@ -54,13 +51,27 @@ jobs:
                       f.write(content)
           PYEOF
 
-          # حقن كود Groovy لفرض compileSdk 36 على جميع الحزم والـ Subprojects لمنع خطأ share_plus
-          GROOVY_BUILD="android/build.gradle"
-          if [ ! -f "$GROOVY_BUILD" ]; then
-            echo "allprojects { repositories { google() mavenCentral() } }" > "$GROOVY_BUILD"
-          fi
+          # كتابة ملف android/build.gradle بشكل قياسي وصحيح تماماً لتجنب أي أخطاء في الـ Syntax
+          cat << 'EOF' > android/build.gradle
+          allprojects {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
 
-          cat >> "$GROOVY_BUILD" << 'EOF'
+          rootProject.buildDir = '../build'
+          subprojects {
+              project.buildDir = "${rootProject.buildDir}/${project.name}"
+          }
+          subprojects {
+              project.evaluationDependsOn(':app')
+          }
+
+          tasks.register("clean", Delete) {
+              delete rootProject.buildDir
+          }
+
           subprojects {
               afterEvaluate { project ->
                   if (project.hasProperty('android')) {
@@ -94,12 +105,6 @@ jobs:
               content = open(path, encoding="utf-8").read()
               if "com.google.gms.google-services" not in content:
                   content = re.sub(r"(plugins\s*\{\n)", r'\1    id("com.google.gms.google-services") version "4.4.2" apply false\n', content, count=1)
-                  open(path, "w", encoding="utf-8").write(content)
-          elif os.path.exists("android/build.gradle"):
-              path = "android/build.gradle"
-              content = open(path, encoding="utf-8").read()
-              if "com.google.gms:google-services" not in content:
-                  content = re.sub(r"(dependencies\s*\{)", r"\1\n        classpath 'com.google.gms:google-services:4.4.2'", content, count=1)
                   open(path, "w", encoding="utf-8").write(content)
 
           for app_path in ["android/app/build.gradle.kts", "android/app/build.gradle"]:
